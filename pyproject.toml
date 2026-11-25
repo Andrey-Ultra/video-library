@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "video-library-agent"
+version = "0.1.0"
+description = "Resumable local video indexing, event hierarchies and MCP tools"
+requires-python = ">=3.12,<3.15"
+dependencies = ["av>=14,<17", "Pillow>=11,<13", "numpy>=2,<3", "httpx>=0.28,<1", "mcp>=1.12,<2", "fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
+
+[project.optional-dependencies]
+mac = ["mlx-vlm>=0.8.1,<1", "mlx-lm>=0.31,<1", "mlx-embeddings>=0.1,<1", "parakeet-mlx>=0.7,<1", "pyobjc-framework-Vision>=11", "pyobjc-framework-Quartz>=11"]
+cuda = ["transformers>=4.57,<6", "torch>=2.7", "sentence-transformers>=5,<6", "faster-whisper>=1.2,<2", "easyocr>=1.7,<2"]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+video-agent = "video_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["video_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

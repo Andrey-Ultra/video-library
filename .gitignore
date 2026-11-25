@@ -17,13 +17,9 @@ env/
 .idea/
 .vscode/
 
-# Project data (frames, videos, outputs)
-scens/frames/
-frames/
-tests/
-test/
-chroma_data/
-storage/thumbnails_data
+# Test footage is local data, never source code.
+videos/**
+!videos/.gitkeep
 *.mp4
 *.avi
 *.mov
@@ -31,3 +27,12 @@ storage/thumbnails_data
 
 # OS
 .DS_Store
+
+# Local models, library indexes, benchmarks and machine-specific config
+.cache/
+.video-agent/
+video-agent.toml
+.pytest_cache/
+.ruff_cache/
+core
+Video Library.app/

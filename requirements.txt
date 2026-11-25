@@ -1,11 +1,2 @@
-av
-pillow
-numpy
-torch
-transformers
-ffmpeg-python
-python-dotenv
-chromadb
-
-easyocr
-rapidfuzz
+# Apple Silicon; CUDA: pip install -e '.[cuda]'
+-e .[mac]

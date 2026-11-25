@@ -1,0 +1,216 @@
+import Foundation
+
+indirect enum JSONValue: Codable, Equatable {
+  case object([String: JSONValue])
+  case array([JSONValue])
+  case string(String)
+  case number(Double)
+  case bool(Bool)
+  case null
+  init(from decoder: Decoder) throws {
+    let c = try decoder.singleValueContainer()
+    if c.decodeNil() {
+      self = .null
+    } else if let v = try? c.decode(Bool.self) {
+      self = .bool(v)
+    } else if let v = try? c.decode(Double.self) {
+      self = .number(v)
+    } else if let v = try? c.decode(String.self) {
+      self = .string(v)
+    } else if let v = try? c.decode([String: JSONValue].self) {
+      self = .object(v)
+    } else {
+      self = .array(try c.decode([JSONValue].self))
+    }
+  }
+  func encode(to encoder: Encoder) throws {
+    var c = encoder.singleValueContainer()
+    switch self {
+    case .object(let v): try c.encode(v)
+    case .array(let v): try c.encode(v)
+    case .string(let v): try c.encode(v)
+    case .number(let v): try c.encode(v)
+    case .bool(let v): try c.encode(v)
+    case .null: try c.encodeNil()
+    }
+  }
+  subscript(_ key: String) -> JSONValue {
+    get {
+      if case .object(let v) = self { return v[key] ?? .null }
+      return .null
+    }
+    set {
+      var v = object
+      v[key] = newValue
+      self = .object(v)
+    }
+  }
+  var object: [String: JSONValue] {
+    if case .object(let v) = self { return v }
+    return [:]
+  }
+  var string: String {
+    if case .string(let v) = self { return v }
+    return ""
+  }
+  var number: Double {
+    if case .number(let v) = self { return v }
+    return 0
+  }
+  var bool: Bool {
+    if case .bool(let v) = self { return v }
+    return false
+  }
+  var pretty: String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+    return (try? String(decoding: encoder.encode(self), as: UTF8.self)) ?? "{}"
+  }
+}
+struct Library: Equatable, Decodable, Identifiable {
+  let id: String
+  let path: String
+  var config: JSONValue
+  var name: String { URL(fileURLWithPath: path).lastPathComponent }
+}
+struct Stage: Equatable, Decodable, Identifiable {
+  let name: String
+  let status: String
+  let checkpoint: Int
+  let elapsed_s: Double
+  let error: String?
+  let provenance: JSONValue?
+  var id: String { name }
+}
+struct Video: Equatable, Decodable, Identifiable {
+  let id: Int
+  let path: String
+  let fingerprint: String
+  let metadata: JSONValue
+  let stages: [Stage]
+  let error: String?
+  let summary: String?
+  let needs_index: Bool?
+  let outdated: [String]?
+  let locations: [String]?
+  let item_count: Int?
+  let vector_count: Int?
+  let counts: [String: Int]?
+  let source_available: Bool?
+  let size_bytes: Int64?
+  var name: String {
+    URL(fileURLWithPath: path).lastPathComponent.precomposedStringWithCanonicalMapping
+  }
+  var duration: Double { metadata["duration_ms"].number / 1000 }
+  var status: String {
+    if error != nil || stages.contains(where: { $0.status == "failed" }) { return "Attention" }
+    if stages.contains(where: { $0.status == "running" }) { return "Indexing" }
+    return needs_index == true ? "Pending" : "Indexed"
+  }
+}
+struct Job: Equatable, Decodable {
+  let id: String
+  let status: String
+  let kind: String
+  let error: String?
+  let log: String?
+  var running: Bool { ["starting", "running", "pausing"].contains(status) }
+}
+struct ProgressState: Equatable, Decodable {
+  let fraction: Double
+  let eta_s: Double?
+}
+struct BusyJob: Equatable, Decodable {
+  let id: String
+  let library_id: String
+}
+struct Snapshot: Equatable, Decodable {
+  let libraries: [Library]
+  let active_id: String?
+  let active: Library?
+  let videos: [Video]
+  let job: Job?
+  let busy_job: BusyJob?
+  let file_count: Int
+  let duplicate_count: Int
+  let item_count: Int
+  let progress: ProgressState
+  let mcp_config: JSONValue
+  let mcp_command: String
+  let defaults: [String: JSONValue]
+  let folder_unavailable: Bool?
+}
+struct Observation: Decodable, Identifiable {
+  let id: String
+  let video_id: Int
+  let kind: String
+  let text: String
+  let start_s: Double
+  let end_s: Double
+  let payload: JSONValue
+  let children: [String]?
+  let parents: [String]?
+  let provenance: JSONValue?
+  let stage_status: String?
+  let speech_and_ocr: [Observation]?
+  var shortText: String {
+    payload["description"].string.isEmpty ? text : payload["description"].string
+  }
+}
+struct ObservationPage: Decodable {
+  let total: Int
+  let items: [Observation]
+}
+struct ClipRoute: Codable, Hashable {
+  let libraryID: String
+  let videoID: Int
+}
+struct IndexMethod: Identifiable {
+  let id: String
+  let name: String
+  let symbol: String
+  let letter: String
+  let backends: [String]
+  static let all: [Self] = [
+    .init(
+      id: "visual", name: "Visual understanding", symbol: "viewfinder", letter: "V",
+      backends: ["mlx", "openai", "none"]),
+    .init(
+      id: "speech", name: "Speech transcription", symbol: "waveform", letter: "S",
+      backends: ["parakeet", "faster-whisper", "none"]),
+    .init(
+      id: "ocr", name: "On-screen text", symbol: "text.viewfinder", letter: "T",
+      backends: ["vision", "easyocr", "none"]),
+    .init(
+      id: "hierarchy", name: "Events & video tree", symbol: "point.3.connected.trianglepath.dotted",
+      letter: "H", backends: []),
+    .init(
+      id: "embedding", name: "Semantic search", symbol: "sparkle.magnifyingglass", letter: "E",
+      backends: ["mlx", "sentence-transformers", "none"]),
+  ]
+  func enabled(_ config: JSONValue) -> Bool {
+    id == "hierarchy" ? config[id]["enabled"].bool : config[id]["backend"].string != "none"
+  }
+  func label(_ config: JSONValue) -> String {
+    if !enabled(config) { return "Disabled" }
+    if id == "hierarchy" {
+      return "Visual events · groups of \(Int(config[id]["group_size"].number))"
+    }
+    if id == "ocr" {
+      return
+        "\(config[id]["backend"].string == "vision" ? "Apple Vision" : "EasyOCR") · \(config[id]["sample_fps"].number.formatted()) fps"
+    }
+    return config[id]["model"].string.components(separatedBy: "/").last ?? ""
+  }
+}
+func clock(_ seconds: Double, precise: Bool = false) -> String {
+  let ms = Int((max(0, seconds) * 1000).rounded())
+  let s = ms / 1000
+  let base = String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60)
+  return precise ? base + String(format: ".%03d", ms % 1000) : base
+}
+func duration(_ seconds: Double) -> String {
+  let s = Int(max(0, seconds).rounded())
+  if s >= 3600 { return "\(s/3600)h \(s/60%60)m" }
+  return s >= 60 ? "\(s/60)m \(s%60)s" : "\(s)s"
+}

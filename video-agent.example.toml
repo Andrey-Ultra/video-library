@@ -1,0 +1,44 @@
+# Copy to video-agent.toml. Run: python main.py /path/to/videos --config video-agent.toml
+[visual]
+backend = "mlx" # mlx | openai | none
+model = "mlx-community/Qwen3-VL-2B-Instruct-4bit"
+window_s = 10.0
+overlap_s = 2.0
+frames_per_window = 6
+max_side = 448
+max_tokens = 384
+# For a local vLLM server use backend = "openai":
+# base_url = "http://localhost:8000/v1"
+# model = "Qwen/Qwen3-VL-8B-Instruct"
+# api_key_env = "VIDEO_AGENT_API_KEY"
+
+[speech]
+backend = "parakeet" # parakeet | faster-whisper | none
+model = "mlx-community/parakeet-tdt-0.6b-v2"
+chunk_s = 120.0
+device = "cuda" # faster-whisper only
+compute_type = "float16"
+
+[ocr]
+backend = "vision" # vision | easyocr | none
+sample_fps = 1.0
+max_side = 1280
+min_confidence = 0.4
+
+[embedding]
+backend = "mlx" # mlx | sentence-transformers | none
+model = "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"
+batch_size = 8
+device = "cuda" # sentence-transformers only
+
+[hierarchy]
+enabled = true
+group_size = 8
+
+[answer]
+backend = "mlx-text" # mlx-text | mlx | openai | none; independent of indexing
+model = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+max_tokens = 768
+
+[runtime]
+cache_dir = ".cache/models"
