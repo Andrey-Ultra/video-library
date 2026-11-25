@@ -24,7 +24,12 @@ PROJECT = Path(__file__).resolve().parent.parent
 
 def state_directory(path=None):
     return (
-        Path(path or os.environ.get("VIDEO_AGENT_STATE_DIR", PROJECT / ".cache" / "app"))
+        Path(
+            path
+            or os.environ.get(
+                "VIDEO_LIBRARY_STATE_DIR", os.environ.get("VIDEO_AGENT_STATE_DIR", PROJECT / ".cache" / "app")
+            )
+        )
         .expanduser()
         .resolve()
     )
@@ -76,6 +81,14 @@ class AppState:
                 library_id TEXT,video_id INTEGER,stage TEXT,signature TEXT,elapsed REAL,units REAL,
                 PRIMARY KEY(library_id,video_id,stage));
             """)
+            columns = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+            if "position" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN position REAL NOT NULL DEFAULT 0")
+                db.execute("UPDATE jobs SET position=created_at")
+            db.execute(
+                "INSERT OR IGNORE INTO preferences(key,value) SELECT 'queue_paused',"
+                "CASE WHEN EXISTS(SELECT 1 FROM jobs WHERE status IN ('paused','interrupted')) THEN '1' ELSE '0' END"
+            )
 
     @contextlib.contextmanager
     def connect(self):
@@ -185,37 +198,75 @@ class AppState:
             else:
                 yield True
 
-    def recover(self):
-        lock = self._lock()
-        if lock:
-            with lock, self.connect() as db:
-                db.execute(
+    @contextlib.contextmanager
+    def queue_guard(self):
+        with (self.directory / "queue.lock").open("a") as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            yield
+
+    def _runner_lock(self):
+        stream = (self.directory / "runner.lock").open("a")
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            stream.close()
+            return None
+        return stream
+
+    def queue_paused(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM preferences WHERE key='queue_paused'").fetchone()
+            return bool(row and row[0] == "1")
+
+    def queue_jobs(self):
+        with self.connect() as db:
+            ids = [
+                r[0]
+                for r in db.execute(
+                    "SELECT id FROM jobs WHERE status IN ('queued','starting','running','pausing','paused','interrupted') "
+                    "ORDER BY CASE WHEN status IN ('starting','running','pausing') THEN 0 ELSE 1 END,position,created_at"
+                )
+            ]
+        return [self.job(i) for i in ids]
+
+    def _recover_locked(self):
+        runner = self._runner_lock()
+        if runner is None:
+            return
+        with runner:
+            # Older app versions own only worker.lock; do not interrupt their work.
+            memory = self._lock()
+            if memory is None:
+                return
+            with memory, self.connect() as db:
+                changed = db.execute(
                     "UPDATE jobs SET status='interrupted',finished_at=?,"
-                    "error='Worker stopped. Resume to continue from saved checkpoints.' "
+                    "error='Worker stopped. Resume the queue to continue from checkpoints.' "
                     "WHERE status IN ('starting','running','pausing')",
                     (time.time(),),
-                )
+                ).rowcount
+                if changed:
+                    db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','1')")
 
-    def launch(self, library_id, kind="index"):
-        if kind not in {"index", "refresh"}:
-            raise ValueError("Invalid job kind")
-        self.recover()
-        lock = self._lock()
-        if not lock:
-            raise ValueError(
-                "Local processing is already running. Pause the job or wait for search to finish."
-            )
-        job_id = uuid.uuid4().hex
+    def recover(self):
+        with self.queue_guard():
+            self._recover_locked()
+            self._dispatch_locked()
+
+    def _dispatch_locked(self):
+        if self.queue_paused():
+            return
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT id FROM jobs WHERE status='queued' ORDER BY position,created_at LIMIT 1"
+            ).fetchone()
+        if not row:
+            return
+        runner = self._runner_lock()
+        if runner is None:
+            return
         try:
-            library = self.library(library_id)
-            config = parse_config(library["config"])
-            with self.connect() as db:
-                db.execute(
-                    "INSERT INTO jobs(id,library_id,folder,kind,config,status,created_at) "
-                    "VALUES(?,?,?,?,?,'starting',?)",
-                    (job_id, library_id, library["path"], kind, json.dumps(asdict(config)), time.time()),
-                )
-            with (self.directory / f"{job_id}.log").open("wb") as log:
+            with (self.directory / "queue-runner.log").open("ab") as log:
                 child = subprocess.Popen(
                     [
                         sys.executable,
@@ -224,35 +275,163 @@ class AppState:
                         "--state",
                         str(self.directory),
                         "--job",
-                        job_id,
+                        row[0],
                         "--lock-fd",
-                        str(lock.fileno()),
+                        str(runner.fileno()),
                     ],
                     cwd=PROJECT,
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
-                    pass_fds=(lock.fileno(),),
+                    pass_fds=(runner.fileno(),),
                     start_new_session=True,
                 )
-            self.update_job(job_id, pid=child.pid)
             threading.Thread(target=child.wait, daemon=True).start()
-        except Exception as exc:
-            with self.connect() as db:
-                db.execute(
-                    "UPDATE jobs SET status='failed',error=?,finished_at=? WHERE id=?",
-                    (str(exc), time.time(), job_id),
-                )
-            raise
         finally:
-            # Child inherits this open file description and keeps the lock alive.
-            lock.close()
+            runner.close()
+
+    def launch(self, library_id, kind="index"):
+        if kind not in {"index", "refresh"}:
+            raise ValueError("Invalid job kind")
+        library = self.library(library_id)
+        config = parse_config(library["config"])
+        with self.queue_guard():
+            self._recover_locked()
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT id FROM jobs WHERE library_id=? AND kind=? "
+                    "AND status IN ('queued','starting','running','pausing','paused','interrupted') "
+                    "ORDER BY position LIMIT 1",
+                    (library_id, kind),
+                ).fetchone()
+                job_id = row[0] if row else uuid.uuid4().hex
+                if not row:
+                    position = db.execute("SELECT coalesce(max(position),0)+1 FROM jobs").fetchone()[0]
+                    db.execute(
+                        "INSERT INTO jobs(id,library_id,folder,kind,config,status,created_at,position) "
+                        "VALUES(?,?,?,?,?,'queued',?,?)",
+                        (
+                            job_id,
+                            library_id,
+                            library["path"],
+                            kind,
+                            json.dumps(asdict(config)),
+                            time.time(),
+                            position,
+                        ),
+                    )
+            self._dispatch_locked()
         return self.job(job_id)
 
+    def next_queued(self, runner_fd, memory):
+        """Claim under the enqueue lock; release locks here to avoid a lost last enqueue."""
+        with self.queue_guard(), self.connect() as db:
+            # Holding model memory proves that no older worker is still processing.
+            stale = db.execute(
+                "UPDATE jobs SET status='interrupted',finished_at=?,error='Worker stopped. Resume the queue.' "
+                "WHERE status IN ('starting','running','pausing')",
+                (time.time(),),
+            ).rowcount
+            if stale:
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','1')")
+            row = (
+                None
+                if self.queue_paused()
+                else db.execute(
+                    "SELECT id FROM jobs WHERE status='queued' ORDER BY position,created_at LIMIT 1"
+                ).fetchone()
+            )
+            if row is None:
+                memory.close()
+                os.close(runner_fd)
+                return None
+            job_id = row[0]
+            db.execute(
+                "UPDATE jobs SET status='starting',pid=?,cancel_requested=0,error=NULL,result=NULL,"
+                "started_at=?,finished_at=NULL WHERE id=?",
+                (os.getpid(), time.time(), job_id),
+            )
+        return self.job(job_id)
+
+    def pause_queue(self):
+        with self.queue_guard(), self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','1')")
+            db.execute(
+                "UPDATE jobs SET cancel_requested=1,status='pausing' WHERE status IN ('starting','running')"
+            )
+        return {"paused": True}
+
+    def resume_queue(self):
+        with self.queue_guard():
+            self._recover_locked()
+            with self.connect() as db:
+                if db.execute("SELECT 1 FROM jobs WHERE status='pausing'").fetchone():
+                    raise ValueError("Wait for the current task to save its checkpoints")
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','0')")
+                db.execute(
+                    "UPDATE jobs SET status='queued',cancel_requested=0,error=NULL "
+                    "WHERE status IN ('paused','interrupted')"
+                )
+            self._dispatch_locked()
+        return {"paused": False}
+
     def pause(self, job_id):
-        job = self.job(job_id)
-        if job["status"] in {"starting", "running", "pausing"}:
-            self.update_job(job_id, cancel_requested=1, status="pausing")
+        self.job(job_id)
+        self.pause_queue()
+        return self.job(job_id)
+
+    def remove_job(self, job_id):
+        with self.queue_guard(), self.connect() as db:
+            changed = db.execute(
+                "UPDATE jobs SET status='cancelled',finished_at=? WHERE id=? "
+                "AND status IN ('queued','paused','interrupted')",
+                (time.time(), job_id),
+            ).rowcount
+            if not changed:
+                raise ValueError("Only waiting or paused tasks can be removed")
+        return self.job(job_id)
+
+    def move_job(self, job_id, direction):
+        if direction not in {"up", "down"}:
+            raise ValueError("Direction must be up or down")
+        with self.queue_guard(), self.connect() as db:
+            rows = list(
+                db.execute(
+                    "SELECT id,position FROM jobs WHERE status IN ('queued','paused','interrupted') "
+                    "ORDER BY position,created_at"
+                )
+            )
+            ids = [r[0] for r in rows]
+            if job_id not in ids:
+                raise ValueError("Wait for the current task to pause before moving it")
+            index = ids.index(job_id)
+            other = index + (-1 if direction == "up" else 1)
+            if 0 <= other < len(rows):
+                ids[index], ids[other] = ids[other], ids[index]
+                db.executemany(
+                    "UPDATE jobs SET position=? WHERE id=?",
+                    [(position, identity) for position, identity in enumerate(ids, 1)],
+                )
+        return self.job(job_id)
+
+    def retry_job(self, job_id):
+        with self.queue_guard():
+            with self.connect() as db:
+                job = self.job(job_id)
+                if job["status"] != "failed":
+                    raise ValueError("Only failed tasks can be retried")
+                if db.execute(
+                    "SELECT 1 FROM jobs WHERE library_id=? AND kind=? AND status IN "
+                    "('queued','running','starting','pausing','paused','interrupted')",
+                    (job["library_id"], job["kind"]),
+                ).fetchone():
+                    raise ValueError("This library is already in the queue")
+                position = db.execute("SELECT coalesce(max(position),0)+1 FROM jobs").fetchone()[0]
+                db.execute(
+                    "UPDATE jobs SET status='queued',position=?,error=NULL,cancel_requested=0 WHERE id=?",
+                    (position, job_id),
+                )
+            self._dispatch_locked()
         return self.job(job_id)
 
     def cancelled(self, job_id):
@@ -281,26 +460,31 @@ class AppState:
             db.executemany("INSERT OR REPLACE INTO timings VALUES(?,?,?,?,?,?)", samples)
 
     def timing_rates(self, config):
+        from statistics import median
+
         from .signatures import stage_signatures
 
         signatures = stage_signatures(config)
         with self.connect() as db:
             return {
-                name: row[0]
+                name: median(samples)
                 for name, signature in signatures.items()
                 if (
-                    row := db.execute(
-                        "SELECT sum(elapsed)/sum(units) FROM timings WHERE stage=? AND signature=?",
-                        (name, signature),
-                    ).fetchone()
-                )[0]
+                    samples := [
+                        row[0]
+                        for row in db.execute(
+                            "SELECT elapsed/units FROM timings WHERE stage=? AND signature=? AND units>0 AND elapsed>0",
+                            (name, signature),
+                        )
+                    ]
+                )
             }
 
     def mcp_config(self):
         # Resolver state is explicit, so another checkout never changes this server.
         return {
             "mcpServers": {
-                "video-agent": {
+                "video-library": {
                     "command": sys.executable,
                     "args": [str(PROJECT / "mcp_server.py"), "--active", "--state-dir", str(self.directory)],
                 }
@@ -308,5 +492,5 @@ class AppState:
         }
 
     def mcp_command(self):
-        config = self.mcp_config()["mcpServers"]["video-agent"]
-        return shlex.join(["codex", "mcp", "add", "video-agent", "--", config["command"], *config["args"]])
+        config = self.mcp_config()["mcpServers"]["video-library"]
+        return shlex.join(["codex", "mcp", "add", "video-library", "--", config["command"], *config["args"]])

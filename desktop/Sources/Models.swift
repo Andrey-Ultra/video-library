@@ -119,10 +119,36 @@ struct Job: Equatable, Decodable {
 struct ProgressState: Equatable, Decodable {
   let fraction: Double
   let eta_s: Double?
+  let eta_status: String?
 }
 struct BusyJob: Equatable, Decodable {
   let id: String
   let library_id: String
+}
+struct QueueTask: Equatable, Decodable, Identifiable {
+  let id: String
+  let library_id: String
+  let folder: String
+  let kind: String
+  let status: String
+  let error: String?
+  let progress: ProgressState?
+  let video_count: Int?
+  let indexed_count: Int?
+  let current_file: String?
+  let current_stage: String?
+  var name: String {
+    URL(fileURLWithPath: folder).lastPathComponent.precomposedStringWithCanonicalMapping
+  }
+  var running: Bool { ["starting", "running", "pausing"].contains(status) }
+  var waiting: Bool { ["queued", "paused", "interrupted"].contains(status) }
+}
+struct QueueState: Equatable, Decodable {
+  let paused: Bool
+  let jobs: [QueueTask]
+  let running: QueueTask?
+  let waiting_count: Int
+  var pendingCount: Int { jobs.filter { $0.waiting || $0.running }.count }
 }
 struct Snapshot: Equatable, Decodable {
   let libraries: [Library]
@@ -139,6 +165,7 @@ struct Snapshot: Equatable, Decodable {
   let mcp_command: String
   let defaults: [String: JSONValue]
   let folder_unavailable: Bool?
+  let queue: QueueState?
 }
 struct Observation: Decodable, Identifiable {
   let id: String

@@ -271,7 +271,7 @@ def test_saved_config_and_read_only_mcp_tools(tmp_path, config, fake_media):
     with Store(tmp_path, create=False) as store:
         assert library.overview(store)["total"] == 1
     server = build_server(tmp_path)
-    assert server.name == "video-agent"
+    assert server.name == "video-library"
 
 
 def test_embedding_setting_change_only_recomputes_embeddings(tmp_path, config, fake_media):

@@ -32,7 +32,9 @@ videos/**
 .cache/
 .video-agent/
 video-agent.toml
+video-library.toml
 .pytest_cache/
 .ruff_cache/
 core
 Video Library.app/
+Video library.app/

@@ -73,13 +73,12 @@ struct ClipDetailView: View {
   var body: some View {
     VStack(spacing: 0) {
       header
-      Picker("Evidence layer", selection: $tab) {
-        ForEach(
-          [
-            "Overview", "Video tree", "Visual windows", "Speech", "On-screen text", "Index details",
-          ], id: \.self
-        ) { Text($0) }
-      }.pickerStyle(.segmented).padding(.horizontal, 24).padding(.vertical, 16)
+      LibraryTabs(
+        label: "Evidence layer",
+        tabs: [
+          "Overview", "Video tree", "Visual windows", "Speech", "On-screen text", "Index details",
+        ], selection: $tab
+      ).padding(.horizontal, 24).padding(.vertical, 16)
       if let video = clip.video {
         if tab == "Index details" {
           indexDetails(video)
@@ -96,7 +95,7 @@ struct ClipDetailView: View {
       }
     }.background(Palette.background).foregroundStyle(Color.white.opacity(0.9)).preferredColorScheme(
       .dark
-    ).frame(minWidth: 1000, minHeight: 700)
+    ).tint(Palette.accent).frame(minWidth: 1000, minHeight: 700)
       .task { await clip.load(app) }
       .onChange(of: tab) { _, _ in
         search = ""
@@ -123,7 +122,7 @@ struct ClipDetailView: View {
   }
   var header: some View {
     HStack(spacing: 16) {
-      VLMark(size: 34)
+      LibraryMark(size: 34)
       VStack(alignment: .leading, spacing: 6) {
         Text(clip.video?.name ?? "Clip details").font(.system(size: 21, weight: .semibold))
           .textSelection(.enabled)
@@ -132,7 +131,7 @@ struct ClipDetailView: View {
       }
       Spacer()
       Text("SINGLE CLIP").font(.system(size: 10, weight: .semibold)).tracking(1).foregroundStyle(
-        Palette.cyan)
+        Palette.accent)
       ActionButton(label: "Reload", symbol: "arrow.clockwise") {
         Task {
           await clip.load(app)
@@ -177,7 +176,7 @@ struct ClipDetailView: View {
                     Text(title)
                     Spacer()
                     Text("\(video.counts?[key] ?? 0)").monospacedDigit().foregroundStyle(
-                      Palette.cyan)
+                      Palette.accent)
                     Image(systemName: "chevron.right").font(.system(size: 10)).foregroundStyle(
                       Palette.muted)
                   }.padding(.vertical, 7)
@@ -228,7 +227,9 @@ struct ClipDetailView: View {
         HStack {
           Text("\(clip.total) saved observations")
           Spacer()
-          if tab == "On-screen text" { Text("Single-frame samples").foregroundStyle(Palette.cyan) }
+          if tab == "On-screen text" {
+            Text("Single-frame samples").foregroundStyle(Palette.accent)
+          }
         }.font(.system(size: 11)).foregroundStyle(Palette.muted).padding(.horizontal, 24).padding(
           .vertical, 14)
         ScrollView {
@@ -270,7 +271,7 @@ struct ClipDetailView: View {
               ? clock(node.start_s, precise: true)
               : clock(node.start_s, precise: true) + " – " + clock(node.end_s, precise: true)
           ).font(.system(size: 12, weight: .medium, design: .monospaced)).foregroundStyle(
-            Palette.cyan)
+            Palette.accent)
           Spacer()
           if node.kind == "ocr" {
             Text("SAMPLED FRAME").font(.system(size: 9)).foregroundStyle(Palette.muted)
@@ -280,11 +281,11 @@ struct ClipDetailView: View {
           maxWidth: .infinity, alignment: .leading)
         Text(node.id).font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.muted)
       }.padding(17).frame(maxWidth: .infinity, alignment: .leading).background(
-        clip.selected?.id == node.id ? Palette.cyan.opacity(0.065) : Palette.panel,
+        clip.selected?.id == node.id ? Palette.accent.opacity(0.065) : Palette.panel,
         in: RoundedRectangle(cornerRadius: 7)
       ).overlay(
         RoundedRectangle(cornerRadius: 7).stroke(
-          clip.selected?.id == node.id ? Palette.cyan.opacity(0.45) : Palette.line))
+          clip.selected?.id == node.id ? Palette.accent.opacity(0.45) : Palette.line))
     }.buttonStyle(.plain)
   }
   func evidenceInspector(_ video: Video) -> some View {
@@ -308,7 +309,7 @@ struct ClipDetailView: View {
           }
           Text(clock(node.start_s, precise: true) + " – " + clock(node.end_s, precise: true)).font(
             .system(size: 13, design: .monospaced)
-          ).foregroundStyle(Palette.cyan).textSelection(.enabled)
+          ).foregroundStyle(Palette.accent).textSelection(.enabled)
           Text(node.text).font(.system(size: 14)).lineSpacing(6).textSelection(.enabled)
           Text(node.id).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
             .textSelection(.enabled)
@@ -322,7 +323,7 @@ struct ClipDetailView: View {
               VStack(alignment: .leading, spacing: 5) {
                 Text("\(other.kind.uppercased()) · \(clock(other.start_s,precise:true))").font(
                   .system(size: 10, design: .monospaced)
-                ).foregroundStyle(Palette.cyan)
+                ).foregroundStyle(Palette.accent)
                 Text(other.text).font(.system(size: 12)).lineSpacing(4).textSelection(.enabled)
               }.padding(.vertical, 6)
             }
@@ -401,7 +402,7 @@ struct ClipDetailView: View {
                 LabeledContent("Processing time", value: duration(stage.elapsed_s))
               }.font(.system(size: 12))
               if let error = stage.error {
-                Text(error).foregroundStyle(Palette.pink).textSelection(.enabled)
+                Text(error).foregroundStyle(Palette.accent).textSelection(.enabled)
               }
               if let provenance = stage.provenance { JSONBlock(value: provenance) }
             }.padding(22)
@@ -440,13 +441,13 @@ struct TreeNode: View {
         } label: {
           VStack(alignment: .leading, spacing: 6) {
             HStack {
-              Text(node.kind.uppercased()).foregroundStyle(Palette.pink)
-              Text(clock(node.start_s) + " – " + clock(node.end_s)).foregroundStyle(Palette.cyan)
+              Text(node.kind.uppercased()).foregroundStyle(Palette.accent)
+              Text(clock(node.start_s) + " – " + clock(node.end_s)).foregroundStyle(Palette.accent)
             }.font(.system(size: 10, weight: .medium, design: .monospaced))
             Text(node.shortText).font(.system(size: 13)).lineSpacing(4).frame(
               maxWidth: .infinity, alignment: .leading)
           }.padding(12).background(
-            clip.selected?.id == node.id ? Palette.cyan.opacity(0.07) : Palette.panel,
+            clip.selected?.id == node.id ? Palette.accent.opacity(0.07) : Palette.panel,
             in: RoundedRectangle(cornerRadius: 6))
         }.buttonStyle(.plain)
       }

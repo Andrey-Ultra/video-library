@@ -10,6 +10,8 @@ import SwiftUI
   @Published var settingsShown = false
   @Published var mcpShown = false
   @Published var refreshing = false
+  @Published var queueExpanded = false
+  var hideToMenuBar: () -> Void = {}
   private var service: Process?
   private var monitor: Task<Void, Never>?
   private var errorLog: FileHandle?
@@ -95,6 +97,9 @@ import SwiftUI
     service = nil
     try? errorLog?.close()
   }
+  func pausePreviews() {
+    for controller in clipWindows.values { controller.pausePlayback?() }
+  }
   func openClip(_ route: ClipRoute, title: String) {
     if let controller = clipWindows[route] {
       controller.showWindow(nil)
@@ -111,6 +116,7 @@ import SwiftUI
     window.minSize = NSSize(width: 1000, height: 700)
     window.center()
     let controller = ClipWindowController(window: window)
+    controller.pausePlayback = { [weak clipModel] in clipModel?.playback.pause() }
     controller.onClose = { [weak self] in
       clipModel.playback.close()
       self?.clipWindows.removeValue(forKey: route)
@@ -204,11 +210,23 @@ import SwiftUI
     }
   }
   func pause() {
-    guard let id = state?.job?.id else { return }
+    queueControl("pause")
+  }
+  func queueControl(_ action: String) {
     perform {
       let _: JSONValue = try await self.request(
-        "api/jobs/\(id)/pause", method: "POST", body: .object([:]))
+        "api/queue/\(action)", method: "POST", body: .object([:]))
     }
+  }
+  func queueAction(_ task: QueueTask, _ action: String, direction: String? = nil) {
+    perform {
+      let _: JSONValue = try await self.request(
+        "api/jobs/\(task.id)/\(action)", method: "POST",
+        body: .object(direction.map { ["direction": .string($0)] } ?? [:]))
+    }
+  }
+  func queuedTask(_ libraryID: String) -> QueueTask? {
+    state?.queue?.jobs.first { $0.library_id == libraryID && ($0.running || $0.waiting) }
   }
   func save(_ config: JSONValue) async throws {
     guard let id = state?.active_id else { return }
@@ -248,6 +266,7 @@ import SwiftUI
 
 @MainActor final class ClipWindowController: NSWindowController, NSWindowDelegate {
   var onClose: (() -> Void)?
+  var pausePlayback: (() -> Void)?
   override init(window: NSWindow?) {
     super.init(window: window)
     window?.delegate = self

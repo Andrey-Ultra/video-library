@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96" role="img" aria-labelledby="title">
+  <title id="title">Vl — Video library</title>
+  <defs>
+    <linearGradient id="miami" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#f57ab3"/>
+      <stop offset="1" stop-color="#64d9d6"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="80" height="80" rx="19" fill="#1c1c1c" stroke="url(#miami)" stroke-width="1.8"/>
+  <path d="M32.5 35 42.5 61 52.5 35 M63.5 35V61" fill="none" stroke="url(#miami)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

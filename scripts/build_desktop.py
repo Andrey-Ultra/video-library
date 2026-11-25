@@ -9,12 +9,18 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "Video Library.app"
+APP = ROOT / "Video library.app"
 
 
 def build(force=False):
     if platform.system() != "Darwin":
         raise RuntimeError("The native desktop interface currently requires macOS.")
+    # Also update the on-disk casing on case-insensitive macOS volumes.
+    for child in ROOT.iterdir():
+        if child.name == "Video Library.app" and not APP.exists():
+            child.rename(APP)
+        elif child.name == "Video Library.app" and child.samefile(APP):
+            child.rename(APP)
     sources = sorted((ROOT / "desktop" / "Sources").glob("*.swift"))
     executable = APP / "Contents" / "MacOS" / "VideoLibrary"
     inputs = [*sources, ROOT / "desktop" / "Icon.swift", Path(__file__)]
@@ -53,17 +59,18 @@ def build(force=False):
         check=True,
     )
     info = {
-        "CFBundleName": "Video Library",
-        "CFBundleDisplayName": "Video Library",
+        "CFBundleName": "Video library",
+        "CFBundleDisplayName": "Video library",
+        # Keep the identifier stable so the rebrand preserves macOS permissions.
         "CFBundleIdentifier": "local.video-agent.library",
         "CFBundleExecutable": "VideoLibrary",
         "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": "0.2.0",
-        "CFBundleVersion": "2",
+        "CFBundleShortVersionString": "0.3.0",
+        "CFBundleVersion": "3",
         "LSMinimumSystemVersion": "14.0",
         "NSHighResolutionCapable": True,
-        "NSDocumentsFolderUsageDescription": "Video Library reads its local Python environment and the video folders you choose, and saves their indexes.",
-        "NSHumanReadableCopyright": "Local Video Library",
+        "NSDocumentsFolderUsageDescription": "Video library reads its local Python environment and the video folders you choose, and saves their indexes.",
+        "NSHumanReadableCopyright": "Local Video library",
         "VideoAgentProjectRoot": str(ROOT),
     }
     (APP / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))

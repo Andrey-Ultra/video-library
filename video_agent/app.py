@@ -15,15 +15,16 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import media
 from .app_state import PROJECT, AppState, parse_config
 from .config import load_config
-from .progress import estimate
+from .progress import ProgressTracker, estimate
 from .signatures import stage_signatures
 from .store import DB_NAME, DEPENDENTS, STAGES, Store
 
 
-def snapshot(state):
-    state.recover()
+def snapshot(state, tracker=None, library_id=None, include_queue=True, task=None):
+    if include_queue:
+        state.recover()
     libraries = state.libraries()
-    active_id = state.active_id()
+    active_id = library_id or state.active_id()
     result = {
         "libraries": libraries,
         "active_id": active_id,
@@ -37,11 +38,40 @@ def snapshot(state):
         "mcp_command": state.mcp_command(),
         "defaults": {profile: asdict(load_config(profile=profile)) for profile in ("mac", "quality", "cuda")},
     }
+    if include_queue:
+        jobs = state.queue_jobs()
+        cards = [{k: v for k, v in j.items() if k != "config"} for j in jobs]
+        running = next((j for j in jobs if j["status"] in {"starting", "running", "pausing"}), None)
+        queue = {
+            "paused": state.queue_paused(),
+            "jobs": cards,
+            "running": None,
+            "waiting_count": sum(j["status"] == "queued" for j in jobs),
+        }
+        if running:
+            view = snapshot(state, tracker, running["library_id"], False, running)
+            current_video = next(
+                (v for v in view["videos"] if any(t["status"] == "running" for t in v["stages"])), None
+            )
+            current_stage = (
+                next((t["name"] for t in current_video["stages"] if t["status"] == "running"), None)
+                if current_video
+                else None
+            )
+            queue["running"] = {
+                **{k: v for k, v in running.items() if k != "config"},
+                "progress": view["progress"],
+                "video_count": len(view["videos"]),
+                "indexed_count": sum(not v["needs_index"] for v in view["videos"]),
+                "current_file": current_video["path"] if current_video else None,
+                "current_stage": current_stage,
+            }
+        result["queue"] = queue
     if not active_id:
         return result
     selected = state.library(active_id)
     result["active"] = selected
-    job = state.latest_job(active_id)
+    job = task or state.latest_job(active_id)
     if job:
         result["job"] = {k: v for k, v in job.items() if k != "config"}
         log = state.directory / f"{job['id']}.log"
@@ -74,7 +104,7 @@ def snapshot(state):
                 else []
             )
             counts = {}
-            signatures = stage_signatures(parse_config(selected["config"]))
+            signatures = stage_signatures(parse_config(task["config"] if task else selected["config"]))
             for video in videos:
                 count = store.count_items(video["id"])
                 vectors = store.db.execute(
@@ -104,6 +134,12 @@ def snapshot(state):
                 )
                 roots = store.items(video["id"], kind="summary", complete_only=True, limit=1)
                 video["summary"] = roots[0]["text"] if roots else None
+            config = parse_config(task["config"] if task else selected["config"])
+            recent, unstable = (
+                tracker.observe((active_id, job["id"] if job else None), videos, config, counts)
+                if tracker and task
+                else ({}, [])
+            )
             result.update(
                 videos=videos,
                 file_count=len(files) if files else len(videos),
@@ -111,9 +147,11 @@ def snapshot(state):
                 item_count=sum(v["item_count"] for v in videos),
                 progress=estimate(
                     videos,
-                    parse_config(selected["config"]),
+                    config,
                     counts,
-                    historical_rates=state.timing_rates(parse_config(selected["config"])),
+                    historical_rates=state.timing_rates(config),
+                    recent_rates=recent,
+                    unstable_stages=unstable,
                 ),
             )
     except (FileNotFoundError, NotADirectoryError):
@@ -123,6 +161,7 @@ def snapshot(state):
 
 def create_app(directory=None):
     state = AppState(directory)
+    tracker = ProgressTracker()
 
     @asynccontextmanager
     async def lifespan(_):
@@ -133,7 +172,7 @@ def create_app(directory=None):
         yield
 
     app = FastAPI(
-        title="Video Library local service",
+        title="Video library local service",
         lifespan=lifespan,
         docs_url=None,
         redoc_url=None,
@@ -162,11 +201,11 @@ def create_app(directory=None):
 
     @app.get("/")
     def home():
-        return {"app": "Video Library", "interface": "native", "status": "ready"}
+        return {"app": "Video library", "interface": "native", "status": "ready"}
 
     @app.get("/api/state")
     def status():
-        return snapshot(state)
+        return snapshot(state, tracker)
 
     @app.post("/api/libraries")
     def select_folder(body: dict):
@@ -183,6 +222,26 @@ def create_app(directory=None):
     @app.post("/api/jobs/{job_id}/pause")
     def pause_job(job_id: str):
         return state.pause(job_id)
+
+    @app.post("/api/queue/pause")
+    def pause_queue():
+        return state.pause_queue()
+
+    @app.post("/api/queue/resume")
+    def resume_queue():
+        return state.resume_queue()
+
+    @app.post("/api/jobs/{job_id}/remove")
+    def remove_job(job_id: str):
+        return state.remove_job(job_id)
+
+    @app.post("/api/jobs/{job_id}/move")
+    def move_job(job_id: str, body: dict):
+        return state.move_job(job_id, body.get("direction"))
+
+    @app.post("/api/jobs/{job_id}/retry")
+    def retry_job(job_id: str):
+        return state.retry_job(job_id)
 
     @app.get("/api/videos/{video_id}/thumbnail")
     def thumbnail(video_id: int, library_id: str | None = None):

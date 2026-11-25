@@ -30,20 +30,20 @@ struct MainView: View {
             }
           }.padding(30)
         }
-        jobDock
+        QueueDock().environmentObject(model)
       }
     }.background(Palette.background).foregroundStyle(Color.white.opacity(0.9)).preferredColorScheme(
       .dark
     )
-    .tint(Palette.cyan)
+    .tint(Palette.accent)
     .overlay {
       if model.state == nil && model.error == nil {
         Palette.background.opacity(0.97)
         VStack(spacing: 16) {
-          VLMark(size: 54)
+          LibraryMark(size: 54)
           ProgressView("Opening your video library…")
           Text(
-            "If macOS asks for folder access, allow Video Library to read your project and footage."
+            "If macOS asks for folder access, allow Video library to read your project and footage."
           )
           .font(.system(size: 12)).foregroundStyle(Palette.muted)
         }
@@ -53,7 +53,7 @@ struct MainView: View {
     .sheet(isPresented: $model.settingsShown) { SettingsView().environmentObject(model) }
     .sheet(isPresented: $model.mcpShown) { MCPView().environmentObject(model) }
     .alert(
-      "Video Library",
+      "Video library",
       isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })
     ) {
       Button("OK") { model.error = nil }
@@ -65,9 +65,9 @@ struct MainView: View {
   var sidebar: some View {
     VStack(alignment: .leading, spacing: 20) {
       HStack(spacing: 11) {
-        VLMark()
+        LibraryMark()
         VStack(alignment: .leading, spacing: 5) {
-          Text("Video Library").font(.system(size: 15, weight: .semibold))
+          Text("Video library").font(.system(size: 15, weight: .semibold))
           SectionCaption(title: "Local workspace")
         }
       }.padding(.bottom, 22)
@@ -84,23 +84,28 @@ struct MainView: View {
           } label: {
             HStack(spacing: 11) {
               Image(systemName: "folder").foregroundStyle(
-                lib.id == model.state?.active_id ? Palette.cyan : Palette.muted)
+                lib.id == model.state?.active_id ? Palette.accent : Palette.muted)
               VStack(alignment: .leading, spacing: 4) {
                 Text(lib.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                Text(lib.id == model.state?.active_id ? "Active library" : "Video folder").font(
+                Text(
+                  model.queuedTask(lib.id)?.status.capitalized
+                    ?? (lib.id == model.state?.active_id ? "Selected library" : "Video folder")
+                ).font(
                   .system(size: 11)
                 ).foregroundStyle(Palette.muted)
               }
               Spacer(minLength: 0)
             }.padding(11).frame(maxWidth: .infinity, alignment: .leading).background(
-              lib.id == model.state?.active_id ? Palette.cyan.opacity(0.075) : Color.clear,
+              lib.id == model.state?.active_id ? Palette.accent.opacity(0.075) : Color.clear,
               in: RoundedRectangle(cornerRadius: 6))
+              .contentShape(Rectangle())
           }.buttonStyle(.plain).help(lib.path)
         }
         Button(action: model.chooseFolder) {
           Label("Add folder", systemImage: "plus").font(.system(size: 13)).foregroundStyle(
             Palette.muted
           ).frame(maxWidth: .infinity, alignment: .leading).padding(11)
+            .contentShape(Rectangle())
         }.buttonStyle(.plain)
       }
       Spacer()
@@ -111,7 +116,7 @@ struct MainView: View {
       } label: {
         HStack(spacing: 9) {
           Image(systemName: "point.3.connected.trianglepath.dotted").font(.system(size: 22))
-            .foregroundStyle(Palette.pink)
+            .foregroundStyle(Palette.accent)
           VStack(alignment: .leading, spacing: 5) {
             Text("Connect your agent").font(.system(size: 12, weight: .medium))
             Text("MCP · active library").font(.system(size: 10)).foregroundStyle(Palette.muted)
@@ -128,6 +133,9 @@ struct MainView: View {
       Text(model.state?.active?.name ?? "Library")
       Spacer()
       SectionCaption(title: "Desktop")
+      ActionButton(label: "Hide to Menu Bar", symbol: "menubar.rectangle") {
+        model.hideToMenuBar()
+      }
       ActionButton(
         label: "Index settings", symbol: "slider.horizontal.3", disabled: model.state?.active == nil
       ) { model.settingsShown = true }
@@ -146,8 +154,12 @@ struct MainView: View {
       }
       Spacer()
       ActionButton(
-        label: "Refresh folder", symbol: "arrow.clockwise",
-        disabled: model.state?.busy_job != nil || model.state?.active == nil
+        label: model.queuedTask(model.state?.active_id ?? "")?.status.capitalized
+          ?? ((model.state?.videos.contains { $0.needs_index == true } ?? false)
+            ? "Add to queue" : "Refresh folder"),
+        symbol: "arrow.clockwise",
+        disabled: model.queuedTask(model.state?.active_id ?? "") != nil
+          || model.state?.active == nil
       ) { model.run() }
     }
   }
@@ -212,7 +224,8 @@ struct MainView: View {
           }.padding(.horizontal, 18).padding(.bottom, 10)
           if videos.isEmpty {
             VStack(spacing: 14) {
-              Image(systemName: "film.stack").font(.system(size: 32)).foregroundStyle(Palette.cyan)
+              Image(systemName: "film.stack").font(.system(size: 32)).foregroundStyle(
+                Palette.accent)
               Text(
                 model.state?.folder_unavailable == true
                   ? "Folder unavailable" : "Your footage starts here"
@@ -230,7 +243,7 @@ struct MainView: View {
               "\(model.state?.file_count ?? 0) files · \(model.state?.duplicate_count ?? 0) duplicates"
             )
             Spacer()
-            Text("Double-click a clip to explore").foregroundStyle(Palette.cyan.opacity(0.8))
+            Text("Double-click a clip to explore").foregroundStyle(Palette.accent.opacity(0.8))
           }.font(.system(size: 10)).foregroundStyle(Palette.muted).padding(14).overlay(
             alignment: .top
           ) { Palette.line.frame(height: 1) }
@@ -259,17 +272,18 @@ struct MainView: View {
             video.stages.first(where: { $0.name == m.id })?.status == "complete"
             && !(video.outdated ?? []).contains(m.id)
           Text(m.letter).font(.system(size: 10, weight: .semibold)).frame(width: 21, height: 24)
-            .foregroundStyle(done ? Palette.cyan : Palette.muted).background(
-              done ? Palette.cyan.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 4)
+            .foregroundStyle(done ? Palette.accent : Palette.muted).background(
+              done ? Palette.accent.opacity(0.08) : Color.clear,
+              in: RoundedRectangle(cornerRadius: 4)
             ).overlay {
               RoundedRectangle(cornerRadius: 4).stroke(
-                done ? Palette.cyan.opacity(0.25) : Palette.line)
+                done ? Palette.accent.opacity(0.25) : Palette.line)
             }.help(m.name)
         }
       }.frame(width: 130)
       StatusPill(status: video.status).frame(width: 76, alignment: .trailing)
     }.padding(15).background(
-      model.selectedVideo == video.id ? Palette.cyan.opacity(0.035) : Color.clear
+      model.selectedVideo == video.id ? Palette.accent.opacity(0.035) : Color.clear
     ).overlay(alignment: .top) { Palette.line.frame(height: 1) }
       .contentShape(Rectangle())
       .gesture(
@@ -331,19 +345,19 @@ struct MainView: View {
           ForEach(IndexMethod.all) { method in
             HStack(spacing: 10) {
               Image(systemName: method.symbol).font(.system(size: 15)).foregroundStyle(
-                method.id == "embedding" ? Palette.pink : Palette.cyan
+                Palette.accent
               ).frame(width: 32, height: 32).background(
                 Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
               VStack(alignment: .leading, spacing: 5) {
                 Text(method.name).font(.system(size: 12, weight: .medium))
+                  .fixedSize(horizontal: false, vertical: true)
                 Text(method.label(config)).font(.system(size: 10)).foregroundStyle(Palette.muted)
                   .lineLimit(1).help(method.label(config))
-              }
-              Spacer(minLength: 2)
+              }.frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
               Toggle(
                 method.name,
                 isOn: Binding(get: { method.enabled(config) }, set: { model.toggle(method, $0) })
-              ).toggleStyle(.switch).controlSize(.mini).labelsHidden().disabled(
+              ).toggleStyle(LibraryToggleStyle(showsLabel: false)).fixedSize().disabled(
                 method.id == "hierarchy" && !IndexMethod.all[0].enabled(config))
             }.padding(.vertical, 8).overlay(alignment: .top) { Palette.line.frame(height: 1) }
           }
@@ -352,62 +366,12 @@ struct MainView: View {
           }
           Divider()
           Label("Made for local processing", systemImage: "memorychip").font(.system(size: 11))
-            .foregroundStyle(Palette.cyan)
+            .foregroundStyle(Palette.accent)
           Text("One model at a time. Completed steps are saved automatically.").font(
             .system(size: 11)
           ).foregroundStyle(Palette.muted).lineSpacing(4)
         }
       }.padding(18)
     }
-  }
-  var jobDock: some View {
-    let job = model.state?.job
-    let pending = model.state?.videos.filter { $0.needs_index == true }.count ?? 0
-    return HStack(spacing: 25) {
-      Image(
-        systemName: job?.running == true
-          ? "circle.dotted" : pending > 0 ? "square.stack" : "checkmark.circle"
-      ).font(.system(size: 25)).foregroundStyle(Palette.cyan)
-      VStack(alignment: .leading, spacing: 5) {
-        Text(
-          job?.running == true
-            ? (job?.status == "pausing" ? "Saving before pause…" : "Indexing your library")
-            : pending > 0 ? "\(pending) videos ready to index" : "Your library is ready"
-        ).font(.system(size: 13, weight: .medium))
-        Text(
-          job?.error
-            ?? (pending > 0
-              ? "Saved checkpoints will be reused." : "All selected layers are available over MCP.")
-        ).font(.system(size: 11)).foregroundStyle(Palette.muted)
-      }.frame(minWidth: 220, alignment: .leading)
-      VStack(spacing: 8) {
-        HStack {
-          Text(
-            job?.running == true
-              ? "\(Int((model.state?.progress.fraction ?? 0)*100))% · approximate progress"
-              : "All changes saved")
-          Spacer()
-          if job?.running == true {
-            Text(
-              model.state?.progress.eta_s.map { "~\(duration($0)) remaining" }
-                ?? "ETA · calibrating")
-          }
-        }.font(.system(size: 10)).foregroundStyle(Palette.muted)
-        ProgressView(value: model.state?.progress.fraction ?? 0).tint(Palette.cyan)
-      }.frame(maxWidth: .infinity)
-      if job?.running == true {
-        ActionButton(
-          label: job?.status == "pausing" ? "Saving…" : "Pause", disabled: job?.status == "pausing",
-          action: model.pause)
-      } else {
-        ActionButton(
-          label: job?.status == "interrupted" || job?.status == "paused"
-            ? "Resume indexing" : pending > 0 ? "Index \(pending) pending" : "Index up to date",
-          primary: true, disabled: pending == 0 || model.state?.busy_job != nil
-        ) { model.run() }
-      }
-    }.padding(.horizontal, 30).padding(.vertical, 20).background(Palette.panel).overlay(
-      alignment: .top
-    ) { Palette.line.frame(height: 1) }
   }
 }

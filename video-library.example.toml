@@ -1,4 +1,4 @@
-# Copy to video-agent.toml. Run: python main.py /path/to/videos --config video-agent.toml
+# Copy to video-library.toml. Run: python main.py /path/to/videos --config video-library.toml
 [visual]
 backend = "mlx" # mlx | openai | none
 model = "mlx-community/Qwen3-VL-2B-Instruct-4bit"

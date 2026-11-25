@@ -27,7 +27,7 @@ struct ClipPlayerView: View {
           } label: {
             Image(systemName: playback.wantsPlayback ? "pause.fill" : "play.fill")
               .frame(width: 25, height: 22)
-          }.buttonStyle(.plain).foregroundStyle(Palette.cyan)
+          }.buttonStyle(.plain).foregroundStyle(Palette.accent)
             .disabled(!playback.canControl)
             .accessibilityLabel(
               playback.wantsPlayback ? "Pause video" : "Play video")
@@ -48,11 +48,11 @@ struct ClipPlayerView: View {
             .accessibilityLabel(
               playback.isMuted || playback.volume == 0 ? "Unmute video" : "Mute video")
           Slider(value: $playback.volume, in: 0...1).labelsHidden().frame(width: 62)
-            .controlSize(.mini).tint(Palette.cyan).accessibilityLabel("Video volume")
+            .controlSize(.mini).tint(Palette.accent).accessibilityLabel("Video volume")
         }
         if let selection = playback.selection {
           HStack(spacing: 5) {
-            RoundedRectangle(cornerRadius: 1).fill(Palette.pink).frame(width: 3, height: 10)
+            RoundedRectangle(cornerRadius: 1).fill(Palette.accent).frame(width: 3, height: 10)
             Text(selection.isFrame ? "FRAME" : "SELECTED")
               .font(.system(size: 9, weight: .semibold)).tracking(0.7)
             Text(
@@ -63,10 +63,10 @@ struct ClipPlayerView: View {
             )
             .font(.system(size: 10, design: .monospaced)).monospacedDigit()
             Spacer(minLength: 0)
-          }.foregroundStyle(Palette.pink)
+          }.foregroundStyle(Palette.accent)
         }
         if let error = playback.error {
-          Text(error).font(.system(size: 11)).foregroundStyle(Palette.pink)
+          Text(error).font(.system(size: 11)).foregroundStyle(Palette.accent)
             .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
         }
       }.padding(13).background(Palette.panel)
@@ -81,22 +81,22 @@ struct ClipPlayerView: View {
       let cursor = CGFloat(min(1, max(0, shownPosition / total))) * width
       ZStack(alignment: .leading) {
         RoundedRectangle(cornerRadius: 3).fill(Color.white.opacity(0.13)).frame(height: 4)
-        RoundedRectangle(cornerRadius: 3).fill(Palette.cyan.opacity(0.65))
+        RoundedRectangle(cornerRadius: 3).fill(Palette.accent.opacity(0.65))
           .frame(width: cursor, height: 4)
         if let selection = playback.selection {
           let start = CGFloat(min(1, max(0, selection.start / total))) * width
           let end = CGFloat(min(1, max(0, selection.end / total))) * width
           let bandWidth = max(3, end - start)
-          RoundedRectangle(cornerRadius: 2).fill(Palette.pink.opacity(0.35))
+          RoundedRectangle(cornerRadius: 2).fill(Palette.accent.opacity(0.35))
             .frame(width: bandWidth, height: 12).offset(x: min(start, max(0, width - bandWidth)))
-          Rectangle().fill(Palette.pink).frame(width: 2, height: 13)
+          Rectangle().fill(Palette.accent).frame(width: 2, height: 13)
             .offset(x: min(start, width - 2))
           if !selection.isFrame {
-            Rectangle().fill(Palette.pink).frame(width: 2, height: 13)
+            Rectangle().fill(Palette.accent).frame(width: 2, height: 13)
               .offset(x: min(end, width - 2))
           }
         }
-        Circle().fill(Palette.cyan).frame(width: 10, height: 10)
+        Circle().fill(Palette.accent).frame(width: 10, height: 10)
           .offset(x: min(max(0, cursor - 5), width - 10))
       }.frame(height: 24).contentShape(Rectangle())
         .gesture(
@@ -129,7 +129,7 @@ struct ClipPlayerView: View {
         .accessibilityElement().accessibilityLabel("Video timeline")
         .accessibilityValue(clock(shownPosition) + " of " + clock(playback.duration))
         .accessibilityHint(
-          "Seek anywhere in the full video. The pink marker shows the selected observation."
+          "Seek anywhere in the full video. The highlighted marker shows the selected observation."
         )
         .accessibilityAdjustableAction { direction in
           let delta = direction == .increment ? 5.0 : -5.0

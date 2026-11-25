@@ -43,7 +43,7 @@ async def test_active_stdio_server_follows_persisted_folder_without_restart(tmp_
     with Store(second) as store:
         store.register(second / "two.mp4", "two", {"duration_ms": 2000})
     registry = AppState(tmp_path / "state")
-    registry.select(str(first))
+    first_library = registry.select(str(first))
     params = StdioServerParameters(
         command=sys.executable, args=["mcp_server.py", "--active", "--state-dir", str(registry.directory)]
     )
@@ -60,3 +60,25 @@ async def test_active_stdio_server_follows_persisted_folder_without_restart(tmp_
             overview = await session.call_tool("library_overview", {})
             payload = overview.structuredContent or json.loads(overview.content[0].text)
             assert not overview.isError and payload["videos"][0]["path"].endswith("two.mp4")
+            listing = await session.call_tool("list_libraries", {})
+            payload = listing.structuredContent or json.loads(listing.content[0].text)
+            assert len(payload["libraries"]) == 2
+            selected_before = registry.active_id()
+            pinned = await session.call_tool("library_overview", {"library_id": first_library["id"]})
+            payload = pinned.structuredContent or json.loads(pinned.content[0].text)
+            assert not pinned.isError and payload["videos"][0]["path"].endswith("one.mp4")
+            assert payload["library_id"] == first_library["id"]
+            assert registry.active_id() == selected_before
+            for tool in [
+                "library_overview",
+                "search_library",
+                "list_events",
+                "inspect_item",
+                "list_children",
+                "object_inventory",
+                "get_frame",
+            ]:
+                schema = next(t.inputSchema for t in (await session.list_tools()).tools if t.name == tool)
+                assert "library_id" in schema["properties"]
+            invalid = await session.call_tool("library_context", {"library_id": "not-registered"})
+            assert invalid.isError

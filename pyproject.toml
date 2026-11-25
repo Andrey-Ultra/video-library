@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "video-library-agent"
+name = "video-library"
 version = "0.1.0"
 description = "Resumable local video indexing, event hierarchies and MCP tools"
 requires-python = ">=3.12,<3.15"
@@ -15,7 +15,7 @@ cuda = ["transformers>=4.57,<6", "torch>=2.7", "sentence-transformers>=5,<6", "f
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
 
 [project.scripts]
-video-agent = "video_agent.cli:main"
+video-library = "video_agent.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["video_agent"]

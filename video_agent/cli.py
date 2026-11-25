@@ -99,7 +99,9 @@ def main(argv=None):
                 from .app_state import AppState
 
                 state = AppState(args.state_dir)
-                build_server(state.active_folder, model_access=state.model_access).run(transport="stdio")
+                build_server(state.active_folder, model_access=state.model_access, registry=state).run(
+                    transport="stdio"
+                )
             else:
                 build_server(args.folder).run(transport="stdio")
             return 0

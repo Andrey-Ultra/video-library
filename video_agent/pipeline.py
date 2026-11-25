@@ -79,7 +79,7 @@ class Indexer:
                         provenance = {
                             "settings": asdict(getattr(config, stage)),
                             "prompt_version": prompts.PROMPT_VERSION,
-                            "implementation": "video-library-agent/0.1.0",
+                            "implementation": "video-library/0.1.0",
                         }
                         if stage == "hierarchy":
                             provenance["generator"] = asdict(config.visual)
@@ -226,7 +226,7 @@ class Indexer:
             self._check()
             if index < checkpoint:
                 continue
-            with tempfile.TemporaryDirectory(prefix="video-agent-frames-") as temp:
+            with tempfile.TemporaryDirectory(prefix="video-library-frames-") as temp:
                 samples = media.sample_window(
                     Path(video["path"]), window, cfg.frames_per_window, cfg.max_side, Path(temp)
                 )
@@ -297,7 +297,7 @@ class Indexer:
             # Context on both sides avoids cutting words. Assign sentences by midpoint
             # so context is not blindly stored twice. Approximate ASR boundaries remain evidence.
             start, end = max(0, core_start - 2), min(duration_s, core_end + 2)
-            with tempfile.TemporaryDirectory(prefix="video-agent-audio-") as temp:
+            with tempfile.TemporaryDirectory(prefix="video-library-audio-") as temp:
                 audio = Path(temp) / "speech.wav"
                 media.audio_chunk(Path(video["path"]), audio, start, end - start)
                 spans = backend.transcribe(audio)

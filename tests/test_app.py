@@ -47,7 +47,7 @@ def test_api_remembers_folder_and_methods_and_rejects_cross_site_writes(tmp_path
     cfg["hierarchy"]["enabled"] = "false"
     assert client.put(f"/api/libraries/{lib['id']}/config", json=cfg, headers=HEADERS).status_code == 400
     state = client.get("/api/state").json()
-    assert state["mcp_config"]["mcpServers"]["video-agent"]["args"][-1] == str(directory)
+    assert state["mcp_config"]["mcpServers"]["video-library"]["args"][-1] == str(directory)
     assert "--active" in state["mcp_command"]
 
 
@@ -151,8 +151,7 @@ def checkpoint(folder):
 def test_killed_worker_is_recovered_and_resumes_committed_windows(worker_library, fake_worker):
     state, lib, folder = worker_library
     first = state.launch(lib["id"])
-    with pytest.raises(ValueError, match="already running"):
-        state.launch(lib["id"])
+    assert state.launch(lib["id"])["id"] == first["id"]
     wait_for(lambda: checkpoint(folder))
     fake_worker[0].kill()
     fake_worker[0].wait(timeout=5)
@@ -161,8 +160,9 @@ def test_killed_worker_is_recovered_and_resumes_committed_windows(worker_library
     with Store(folder, create=False) as store:
         saved = store.items(1, stage="visual")
         assert len(saved) >= 1
-    second = state.launch(lib["id"])
-    wait_for(lambda: state.job(second["id"])["status"] not in {"starting", "running"})
+    state.resume_queue()
+    second = state.job(first["id"])
+    wait_for(lambda: state.job(second["id"])["status"] in {"complete", "failed"})
     assert state.job(second["id"])["status"] == "complete"
     with Store(folder, create=False) as store:
         assert store.stage(1, "visual")["checkpoint"] == 3
@@ -181,17 +181,19 @@ def test_pause_leaves_checkpoints_and_ui_restart_does_not_interrupt_worker(worke
     wait_for(lambda: state.job(job["id"])["status"] == "paused")
     view = snapshot(state)
     assert view["job"]["status"] == "paused" and view["videos"][0]["needs_index"]
-    resumed = state.launch(lib["id"])
-    wait_for(lambda: state.job(resumed["id"])["status"] == "complete")
+    state.resume_queue()
+    wait_for(lambda: state.job(job["id"])["status"] == "complete")
     assert not snapshot(state)["videos"][0]["needs_index"]
 
 
-def test_mcp_model_access_and_index_worker_share_memory_lock(worker_library):
+def test_mcp_model_access_and_index_worker_share_memory_lock(worker_library, fake_worker):
     state, lib, _ = worker_library
     with state.model_access() as available:
         assert available
-        with pytest.raises(ValueError, match="already running"):
-            state.launch(lib["id"])
+        job = state.launch(lib["id"])
+        assert state.job(job["id"])["status"] == "queued"
+    wait_for(lambda: state.job(job["id"])["status"] == "complete")
+    wait_for(lambda: fake_worker[0].poll() is not None)
     lock = state._lock()
     assert lock
     try:
@@ -306,3 +308,157 @@ def test_clip_details_are_pinned_to_library_and_video_and_preserve_raw_evidence(
     assert client.get(prefix + "/frame", params={"time_s": float("nan")}).status_code == 400
     assert client.get(prefix + "/frame", params={"time_s": 15}).status_code == 400
     assert client.get(prefix + "/frame", params={"time_s": 1}).status_code == 400
+
+
+def queued_library(state, parent, name, config):
+    folder = parent / name
+    folder.mkdir()
+    (folder / "source.mp4").write_bytes(b"test footage")
+    lib = state.select(str(folder))
+    state.save_config(lib["id"], config)
+    return lib, folder
+
+
+def test_queue_is_global_durable_ordered_and_deduplicated(worker_library, fake_worker):
+    from concurrent.futures import ThreadPoolExecutor
+
+    state, first, folder = worker_library
+    second, second_folder = queued_library(
+        state, folder.parent, "second", state.library(first["id"])["config"]
+    )
+    third, _ = queued_library(state, folder.parent, "third", state.library(first["id"])["config"])
+    state.pause_queue()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        repeated = list(pool.map(lambda _: state.launch(first["id"])["id"], range(8)))
+    assert len(set(repeated)) == 1
+    a = state.job(repeated[0])
+    b = state.launch(second["id"])
+    c = state.launch(third["id"])
+    assert fake_worker == []  # Paused queue does not even load a worker.
+    state.move_job(c["id"], "up")
+    restarted = AppState(state.directory)
+    assert restarted.queue_paused()
+    assert [j["id"] for j in restarted.queue_jobs()] == [a["id"], c["id"], b["id"]]
+    restarted.resume_queue()
+    wait_for(lambda: checkpoint(folder))
+    state.select(str(second_folder))  # Browsing a different folder must not retarget status or work.
+    view = snapshot(state)
+    assert view["active_id"] == second["id"]
+    assert view["queue"]["running"]["library_id"] == first["id"]
+    assert view["queue"]["running"]["current_stage"] == "visual"
+    assert view["queue"]["waiting_count"] == 2
+    wait_for(lambda: state.job(b["id"])["status"] == "complete")
+    assert state.job(a["id"])["finished_at"] <= state.job(c["id"])["started_at"]
+    assert state.job(c["id"])["finished_at"] <= state.job(b["id"])["started_at"]
+    assert len(fake_worker) == 1  # One detached process advances the whole queue.
+
+
+def test_queue_pause_stops_advancement_and_removal_keeps_source(worker_library, fake_worker):
+    state, first, folder = worker_library
+    second, second_folder = queued_library(
+        state, folder.parent, "second", state.library(first["id"])["config"]
+    )
+    a, b = state.launch(first["id"]), state.launch(second["id"])
+    wait_for(lambda: checkpoint(folder))
+    state.pause_queue()
+    wait_for(lambda: state.job(a["id"])["status"] == "paused")
+    assert state.job(b["id"])["status"] == "queued"
+    state.remove_job(b["id"])
+    assert (second_folder / "source.mp4").is_file()
+    assert state.job(b["id"])["status"] == "cancelled"
+    state.resume_queue()
+    wait_for(lambda: state.job(a["id"])["status"] == "complete")
+    assert state.job(b["id"])["status"] == "cancelled"
+
+
+def test_queue_failure_does_not_block_next_library_and_settings_are_captured(worker_library, fake_worker):
+    import shutil
+
+    state, first, folder = worker_library
+    second, _ = queued_library(state, folder.parent, "second", state.library(first["id"])["config"])
+    state.pause_queue()
+    a, b = state.launch(first["id"]), state.launch(second["id"])
+    original = b["config"]
+    changed = {**original, "visual": {**original["visual"], "model": "changed-after-enqueue"}}
+    state.save_config(second["id"], changed)
+    assert state.job(b["id"])["config"] == original
+    shutil.rmtree(folder)
+    state.resume_queue()
+    wait_for(lambda: state.job(b["id"])["status"] == "complete")
+    assert state.job(a["id"])["status"] == "failed"
+    assert "unavailable" in state.job(a["id"])["error"]
+    assert state.job(b["id"])["config"] == original
+
+
+def test_legacy_paused_job_migrates_to_paused_queue_without_losing_settings(worker_library):
+    state, lib, _ = worker_library
+    state.pause_queue()
+    job = state.launch(lib["id"])
+    with state.connect() as db:
+        db.execute("UPDATE jobs SET status='paused' WHERE id=?", (job["id"],))
+        db.execute("DELETE FROM preferences WHERE key='queue_paused'")
+    restarted = AppState(state.directory)
+    assert restarted.queue_paused()
+    assert restarted.job(job["id"])["config"] == job["config"]
+
+
+def test_queue_actions_reject_cross_site_and_invalid_reordering(worker_library):
+    state, lib, _ = worker_library
+    state.pause_queue()
+    job = state.launch(lib["id"])
+    client = TestClient(create_app(state.directory))
+    assert client.post("/api/queue/resume").status_code == 403
+    assert (
+        client.post(
+            f"/api/jobs/{job['id']}/move", json={"direction": "sideways"}, headers=HEADERS
+        ).status_code
+        == 400
+    )
+    assert client.post(f"/api/jobs/{job['id']}/remove", headers=HEADERS).json()["status"] == "cancelled"
+    assert state.queue_paused()
+
+
+def test_paused_task_can_be_reordered_and_resume_uses_visible_order(worker_library, fake_worker):
+    state, first, folder = worker_library
+    second, _ = queued_library(state, folder.parent, "second", state.library(first["id"])["config"])
+    a, b = state.launch(first["id"]), state.launch(second["id"])
+    wait_for(lambda: checkpoint(folder))
+    state.pause_queue()
+    wait_for(lambda: state.job(a["id"])["status"] == "paused")
+    with Store(folder, create=False) as store:
+        saved = store.items(1, stage="visual")[0]
+    state.move_job(b["id"], "up")
+    assert [j["id"] for j in state.queue_jobs()] == [b["id"], a["id"]]
+    assert state.job(a["id"])["status"] == "paused"
+    state.resume_queue()
+    wait_for(lambda: state.job(a["id"])["status"] == "complete")
+    assert state.job(b["id"])["finished_at"] <= state.job(a["id"])["started_at"]
+    with Store(folder, create=False) as store:
+        assert store.items(1, stage="visual")[0] == saved
+
+
+def test_queue_does_not_expose_history_or_delete_job_records(worker_library):
+    state, first, folder = worker_library
+    state.pause_queue()
+    for status in ("complete", "failed", "cancelled"):
+        job = state.launch(first["id"])
+        state.update_job(job["id"], status=status, finished_at=time.time())
+        assert state.job(job["id"])["status"] == status
+    assert state.queue_jobs() == []
+    assert snapshot(state)["queue"]["jobs"] == []
+    waiting = state.launch(first["id"])
+    assert [j["id"] for j in state.queue_jobs()] == [waiting["id"]]
+
+
+def test_reorder_includes_interrupted_tasks_even_with_equal_old_positions(worker_library):
+    state, first, folder = worker_library
+    second, _ = queued_library(state, folder.parent, "second", state.library(first["id"])["config"])
+    state.pause_queue()
+    a, b = state.launch(first["id"]), state.launch(second["id"])
+    with state.connect() as db:
+        db.execute("UPDATE jobs SET position=1")
+        db.execute("UPDATE jobs SET status='interrupted' WHERE id=?", (a["id"],))
+    state.move_job(b["id"], "up")
+    assert [j["id"] for j in state.queue_jobs()] == [b["id"], a["id"]]
+    state.move_job(a["id"], "up")
+    assert [j["id"] for j in state.queue_jobs()] == [a["id"], b["id"]]

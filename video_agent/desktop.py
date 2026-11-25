@@ -18,7 +18,7 @@ def launch(state_dir=None, rebuild=False):
     if rebuild:
         build.append("--force")
     subprocess.run(build, check=True)
-    command = ["/usr/bin/open", str(root / "Video Library.app")]
+    command = ["/usr/bin/open", str(root / "Video library.app")]
     if state_dir:
         command.extend(["--args", "--state-dir", str(Path(state_dir).expanduser().resolve())])
     subprocess.run(command, check=True)

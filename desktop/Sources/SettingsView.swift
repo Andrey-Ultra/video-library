@@ -49,6 +49,7 @@ struct SettingsView: View {
                 Text(method.name).font(.system(size: 15, weight: .medium))
                 if method.id == "hierarchy" {
                   Toggle("Build event tree", isOn: bool("hierarchy", "enabled"))
+                    .toggleStyle(LibraryToggleStyle())
                   numberRow("Windows per group", "hierarchy", "group_size")
                 } else {
                   HStack {
@@ -89,7 +90,7 @@ struct SettingsView: View {
         }.padding(.trailing, 5)
       }
       if let error {
-        Text(error).font(.system(size: 12)).foregroundStyle(Palette.pink).textSelection(.enabled)
+        Text(error).font(.system(size: 12)).foregroundStyle(Palette.accent).textSelection(.enabled)
       }
       HStack {
         Spacer()
@@ -179,19 +180,19 @@ struct MCPView: View {
   @State private var copied = false
   var text: String {
     guard let state = model.state else { return "" }
-    let config = state.mcp_config["mcpServers"]["video-agent"]
+    let config = state.mcp_config["mcpServers"]["video-library"]
     switch format {
     case "JSON": return state.mcp_config.pretty
     case "Codex TOML":
       return
-        "[mcp_servers.video-agent]\ncommand = \(config["command"].pretty)\nargs = \(config["args"].pretty)"
+        "[mcp_servers.video-library]\ncommand = \(config["command"].pretty)\nargs = \(config["args"].pretty)"
     default: return state.mcp_command
     }
   }
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
       HStack {
-        VLMark()
+        LibraryMark()
         VStack(alignment: .leading, spacing: 7) {
           SectionCaption(title: "Model Context Protocol")
           Text("Your footage, in your agent").font(.system(size: 23, weight: .semibold))
@@ -199,11 +200,10 @@ struct MCPView: View {
         Spacer()
       }
       Text(
-        "Add this local stdio server once. It follows your active library, even when this app is closed."
+        "Add this local stdio server once. Your agent can list libraries and choose a library_id independently of this window, even when the app is closed."
       ).font(.system(size: 14)).foregroundStyle(Palette.muted).lineSpacing(5)
-      Picker("Connection format", selection: $format) {
-        ForEach(["Codex CLI", "JSON", "Codex TOML"], id: \.self) { Text($0) }
-      }.pickerStyle(.segmented)
+      LibraryTabs(
+        label: "Connection format", tabs: ["Codex CLI", "JSON", "Codex TOML"], selection: $format)
       ScrollView {
         Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).frame(
           maxWidth: .infinity, alignment: .leading
@@ -212,7 +212,7 @@ struct MCPView: View {
         Palette.panel, in: RoundedRectangle(cornerRadius: 7))
       Label(model.state?.active?.path ?? "Choose a folder first", systemImage: "folder").font(
         .system(size: 12)
-      ).foregroundStyle(Palette.cyan).textSelection(.enabled)
+      ).foregroundStyle(Palette.accent).textSelection(.enabled)
       Text(
         "Search · Browse events · Explore trees · Inspect frames\nAsk your agent: “What is in my active video library?”"
       ).font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(8)
