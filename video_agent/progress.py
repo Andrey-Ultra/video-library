@@ -149,7 +149,18 @@ def estimate(videos, config, counts, historical_rates=None, recent_rates=None, u
             completed_weight += done_units / total_units
     unstable = [name for name in unstable_stages if remaining.get(name)]
     eta = None if unknown or unstable else sum(v or 0 for v in remaining.values())
+    current_stage = next(
+        (stage["name"] for video in videos for stage in video["stages"] if stage["status"] == "running"), None
+    )
+    stage_eta = remaining.get(current_stage) if current_stage not in unstable else None
     return {
+        "stage_eta_s": stage_eta,
+        "stage_eta_name": current_stage,
+        "stage_eta_status": "recalibrating"
+        if current_stage in unstable
+        else "calibrating"
+        if stage_eta is None
+        else "estimated",
         "fraction": completed_weight / measured if measured else 0,
         "eta_s": eta if pending else 0,
         "eta_status": "recalibrating" if unstable else "calibrating" if unknown else "estimated",

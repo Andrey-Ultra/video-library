@@ -86,7 +86,6 @@ import SwiftUI
     .commands {
       CommandGroup(replacing: .newItem) {
         Button("Open video folder…", action: model.chooseFolder).keyboardShortcut("o")
-        Button("Index settings…") { model.settingsShown = true }.keyboardShortcut(",")
       }
       CommandGroup(after: .toolbar) { Button("Connect your agent…") { model.mcpShown = true } }
       CommandGroup(after: .appVisibility) {

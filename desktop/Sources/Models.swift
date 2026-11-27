@@ -73,6 +73,21 @@ struct Library: Equatable, Decodable, Identifiable {
   var config: JSONValue
   var name: String { URL(fileURLWithPath: path).lastPathComponent }
 }
+struct FolderInspection: Decodable {
+  let path: String
+  let config: JSONValue
+  let has_saved_config: Bool
+  let needs_resume: Bool?
+  let library_id: String?
+}
+struct IndexSettingsSession: Identifiable {
+  let id = UUID()
+  let path: String
+  let libraryID: String?
+  let config: JSONValue
+  let initialSetup: Bool
+  var name: String { URL(fileURLWithPath: path).lastPathComponent }
+}
 struct Stage: Equatable, Decodable, Identifiable {
   let name: String
   let status: String
@@ -108,6 +123,10 @@ struct Video: Equatable, Decodable, Identifiable {
     return needs_index == true ? "Pending" : "Indexed"
   }
 }
+struct IndexResetResult: Decodable {
+  let library: Library
+  let warnings: [String]
+}
 struct Job: Equatable, Decodable {
   let id: String
   let status: String
@@ -120,6 +139,18 @@ struct ProgressState: Equatable, Decodable {
   let fraction: Double
   let eta_s: Double?
   let eta_status: String?
+  let stage_eta_s: Double?
+  let stage_eta_name: String?
+  let stage_eta_status: String?
+  var remainingLabel: String {
+    if let eta_s { return "~\(duration(eta_s)) remaining" }
+    if let seconds = stage_eta_s, let stage = stage_eta_name {
+      let name = IndexMethod.all.first { $0.id == stage }?.name ?? stage
+      return "~\(duration(seconds)) left · \(name)"
+    }
+    return stage_eta_status == "recalibrating" || eta_status == "recalibrating"
+      ? "ETA · recalibrating" : "ETA · measuring current stage"
+  }
 }
 struct BusyJob: Equatable, Decodable {
   let id: String
@@ -150,7 +181,21 @@ struct QueueState: Equatable, Decodable {
   let waiting_count: Int
   var pendingCount: Int { jobs.filter { $0.waiting || $0.running }.count }
 }
+struct SpeechModelOption: Equatable, Decodable, Identifiable {
+  let id: String
+  let name: String
+  let languages: [String]
+}
+struct SpeechLanguageOption: Equatable, Decodable {
+  let code: String
+  let name: String
+}
+struct SpeechOptions: Equatable, Decodable {
+  let parakeet_models: [SpeechModelOption]
+  let whisper_languages: [SpeechLanguageOption]
+}
 struct Snapshot: Equatable, Decodable {
+  let speech_options: SpeechOptions?
   let libraries: [Library]
   let active_id: String?
   let active: Library?
@@ -240,4 +285,36 @@ func duration(_ seconds: Double) -> String {
   let s = Int(max(0, seconds).rounded())
   if s >= 3600 { return "\(s/3600)h \(s/60%60)m" }
   return s >= 60 ? "\(s/60)m \(s%60)s" : "\(s)s"
+}
+
+
+struct LocalModelAsset: Decodable, Identifiable {
+  let id: String
+  let section: String
+  let name: String
+  let detail: String
+  let status: String
+  let error: String?
+  let completed_files: Int?
+  let total_files: Int?
+  let filename: String?
+  var busy: Bool { status == "downloading" || status == "checking" }
+}
+struct MacHardware: Decodable {
+  let supported: Bool
+  let chip: String
+  let memory_gb: Int
+  let cpu_cores: Int
+  var description: String { "\(chip) · \(memory_gb) GB memory" }
+}
+struct ModelResources: Decodable {
+  let hardware: MacHardware
+  let recommended: JSONValue
+  let models: [LocalModelAsset]
+  let required: [String]
+  func suggestedConfig(preserving current: JSONValue) -> JSONValue {
+    var result = recommended
+    for section in ["runtime", "proxy", "answer"] { result[section] = current[section] }
+    return result
+  }
 }

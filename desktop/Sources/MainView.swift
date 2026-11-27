@@ -50,7 +50,9 @@ struct MainView: View {
       }
     }
     .frame(minWidth: 1060, minHeight: 690)
-    .sheet(isPresented: $model.settingsShown) { SettingsView().environmentObject(model) }
+    .sheet(item: $model.indexSettings) { session in
+      SettingsView(session: session).environmentObject(model)
+    }
     .sheet(isPresented: $model.mcpShown) { MCPView().environmentObject(model) }
     .alert(
       "Video library",
@@ -100,6 +102,18 @@ struct MainView: View {
               in: RoundedRectangle(cornerRadius: 6))
               .contentShape(Rectangle())
           }.buttonStyle(.plain).help(lib.path)
+            .contextMenu {
+              Button("Indexing settings…", systemImage: "slider.horizontal.3") {
+                model.editIndexSettings(lib)
+              }.disabled(model.queuedTask(lib.id)?.running == true)
+              Divider()
+              Button("Delete index…", systemImage: "arrow.counterclockwise", role: .destructive) {
+                model.confirmDeleteIndex(lib)
+              }.disabled(model.queuedTask(lib.id)?.running == true)
+              Button("Delete library and index…", systemImage: "trash", role: .destructive) {
+                model.confirmDeleteLibrary(lib)
+              }.disabled(model.queuedTask(lib.id)?.running == true)
+            }
         }
         Button(action: model.chooseFolder) {
           Label("Add folder", systemImage: "plus").font(.system(size: 13)).foregroundStyle(
@@ -128,20 +142,11 @@ struct MainView: View {
   }
   var topbar: some View {
     HStack {
-      Text("Workspace").foregroundStyle(Palette.muted)
-      Text("/").foregroundStyle(Palette.muted.opacity(0.5))
-      Text(model.state?.active?.name ?? "Library")
+      Text(model.state?.active?.path ?? "Choose a folder to begin")
+        .foregroundStyle(Palette.muted).textSelection(.enabled)
+        .fixedSize(horizontal: false, vertical: true)
       Spacer()
-      SectionCaption(title: "Desktop")
-      ActionButton(label: "Hide to Menu Bar", symbol: "menubar.rectangle") {
-        model.hideToMenuBar()
-      }
-      ActionButton(
-        label: "Index settings", symbol: "slider.horizontal.3", disabled: model.state?.active == nil
-      ) { model.settingsShown = true }
-    }.font(.system(size: 12)).padding(.horizontal, 30).padding(.vertical, 14).overlay(
-      alignment: .bottom
-    ) { Palette.line.frame(height: 1) }
+    }.font(.system(size: 12)).padding(.horizontal, 30).padding(.vertical, 14)
   }
   var heading: some View {
     HStack(alignment: .center) {
@@ -304,11 +309,18 @@ struct MainView: View {
     guard let libraryID = model.state?.active_id else { return }
     model.openClip(ClipRoute(libraryID: libraryID, videoID: video.id), title: video.name)
   }
+  func settingSummary(_ title: String, _ value: String) -> some View {
+    HStack(alignment: .top) {
+      Text(title).foregroundStyle(Palette.muted)
+      Spacer(minLength: 8)
+      Text(value).multilineTextAlignment(.trailing)
+    }.font(.system(size: 11))
+  }
   var inspector: some View {
     Panel {
       VStack(alignment: .leading, spacing: 16) {
         HStack {
-          Text(selected == nil ? "Indexing methods" : "Clip details").font(
+          Text(selected == nil ? "Index coverage" : "Clip details").font(
             .system(size: 14, weight: .semibold))
           Spacer()
           if selected != nil {
@@ -318,7 +330,7 @@ struct MainView: View {
               Image(systemName: "xmark")
             }.buttonStyle(.plain)
           } else {
-            SectionCaption(title: "Modular")
+            SectionCaption(title: "Saved")
           }
         }
         if let video = selected {
@@ -340,8 +352,15 @@ struct MainView: View {
             label: "Explore this clip", symbol: "arrow.up.left.and.arrow.down.right", primary: true
           ) { openClip(video) }
         } else if let config = model.state?.active?.config {
-          Text("Choose what your agent can understand.").font(.system(size: 12)).foregroundStyle(
-            Palette.muted)
+          Text("Saved progress and selected settings.").font(.system(size: 12)).foregroundStyle(Palette.muted)
+          VStack(spacing: 9) {
+            settingSummary("Analysis source", config["proxy"]["resolution"].string == "1080p" ? "Up to 1080p"
+              : config["proxy"]["resolution"].string == "720p" ? "Up to 720p" : "Original")
+            settingSummary("Frame rate cap", config["proxy"]["max_fps"].number > 0
+              ? "\(Int(config["proxy"]["max_fps"].number)) fps" : "Original")
+            settingSummary("Visual sampling", "\(Int(config["visual"]["frames_per_window"].number)) frames / \(config["visual"]["window_s"].number.formatted())s")
+            settingSummary("Text sampling", "\(config["ocr"]["sample_fps"].number.formatted()) fps")
+          }.padding(.vertical, 4)
           ForEach(IndexMethod.all) { method in
             HStack(spacing: 10) {
               Image(systemName: method.symbol).font(.system(size: 15)).foregroundStyle(
@@ -351,23 +370,30 @@ struct MainView: View {
               VStack(alignment: .leading, spacing: 5) {
                 Text(method.name).font(.system(size: 12, weight: .medium))
                   .fixedSize(horizontal: false, vertical: true)
+                let complete = model.state?.videos.filter { video in
+                  video.outdated?.contains(method.id) != true
+                    && video.stages.contains { $0.name == method.id && $0.status == "complete" }
+                }.count ?? 0
                 Text(method.label(config)).font(.system(size: 10)).foregroundStyle(Palette.muted)
-                  .lineLimit(1).help(method.label(config))
+                  .lineLimit(2).help(method.label(config))
+                Text(method.enabled(config)
+                  ? "\(complete) of \(model.state?.videos.count ?? 0) videos ready" : "Disabled")
+                  .font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1)
               }.frame(maxWidth: .infinity, alignment: .leading).layoutPriority(1)
-              Toggle(
-                method.name,
-                isOn: Binding(get: { method.enabled(config) }, set: { model.toggle(method, $0) })
-              ).toggleStyle(LibraryToggleStyle(showsLabel: false)).fixedSize().disabled(
-                method.id == "hierarchy" && !IndexMethod.all[0].enabled(config))
+
             }.padding(.vertical, 8).overlay(alignment: .top) { Palette.line.frame(height: 1) }
           }
-          ActionButton(label: "Configure models & sampling", symbol: "slider.horizontal.3") {
-            model.settingsShown = true
+          if let library = model.state?.active {
+            ActionButton(label: "Indexing settings…", symbol: "slider.horizontal.3") {
+              model.editIndexSettings(library)
+            }.disabled(model.queuedTask(library.id)?.running == true)
           }
           Divider()
           Label("Made for local processing", systemImage: "memorychip").font(.system(size: 11))
             .foregroundStyle(Palette.accent)
-          Text("One model at a time. Completed steps are saved automatically.").font(
+          Text(model.queuedTask(model.state?.active_id ?? "")?.running == true
+            ? "Pause this library’s task to change its settings. Completed steps are saved automatically."
+            : "Completed steps are saved automatically.").font(
             .system(size: 11)
           ).foregroundStyle(Palette.muted).lineSpacing(4)
         }

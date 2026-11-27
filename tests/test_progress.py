@@ -108,3 +108,27 @@ def test_historical_rates_use_typical_completed_video_not_retry_outlier(tmp_path
         )
         db.execute("INSERT INTO timings VALUES(?,?,?,?,?,?)", ("old", 1, "ocr", "old-model", 1, 100))
     assert state.timing_rates(ocr_config)["ocr"] == pytest.approx(0.32)
+
+
+def test_current_stage_eta_is_available_while_future_layers_are_unmeasured():
+    cfg = load_config()
+    cfg.speech.backend = "none"
+    current = video(cfg, done=20, elapsed=10)
+    result = estimate([current], cfg, {1: (10, 0)})
+    assert result["eta_s"] is None  # No invented whole-library total.
+    assert "visual" in result["unmeasured_stages"]
+    assert result["stage_eta_name"] == "ocr" and result["stage_eta_s"] == 40
+    assert result["stage_eta_status"] == "estimated"
+    advanced = video(cfg, done=40, elapsed=20)
+    assert estimate([advanced], cfg, {1: (10, 0)})["stage_eta_s"] == 30
+
+
+def test_unstable_current_layer_does_not_show_a_confident_stage_eta(ocr_config):
+    result = estimate(
+        [video(ocr_config, done=30, elapsed=10)],
+        ocr_config,
+        {},
+        recent_rates={"ocr": 0.3},
+        unstable_stages=["ocr"],
+    )
+    assert result["stage_eta_s"] is None and result["stage_eta_status"] == "recalibrating"

@@ -10,7 +10,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from . import backends, media, prompts
+from .backends.common import ModelSetupError
 from .config import Config
+from .proxy import ProxyCache
 from .signatures import embedding_namespace, stage_signatures
 from .store import STAGES, Store
 from .sync import synchronize
@@ -64,7 +66,8 @@ class Indexer:
         config, store = self.config, self.store
         config.configure_cache()
         started = time.perf_counter()
-        with writer_lock(store):
+        with writer_lock(store), tempfile.TemporaryDirectory(prefix="video-library-proxies-") as temp:
+            self._proxies = ProxyCache(Path(temp), config.proxy, self._check)
             sync = synchronize(store)
             selected = store.videos(limit=max_videos if max_videos is not None else 1_000_000)
             logger.info("Discovered files: %d; unique videos: %d", sync["files"], len(selected))
@@ -81,6 +84,8 @@ class Indexer:
                             "prompt_version": prompts.PROMPT_VERSION,
                             "implementation": "video-library/0.1.0",
                         }
+                        if stage in {"visual", "ocr"}:
+                            provenance["analysis_proxy"] = asdict(config.proxy)
                         if stage == "hierarchy":
                             provenance["generator"] = asdict(config.visual)
                         store.prepare(video_id, stage, signatures[stage], force, provenance)
@@ -147,6 +152,8 @@ class Indexer:
                                 error=str(exc),
                                 elapsed_s=previous_elapsed + time.perf_counter() - t0,
                             )
+                            if isinstance(exc, ModelSetupError):
+                                raise
                             errors.append({"video_id": video_id, "stage": stage, "error": str(exc)})
                             logger.exception(
                                 "%s: %s failed; restart to resume processing",
@@ -227,8 +234,8 @@ class Indexer:
             if index < checkpoint:
                 continue
             with tempfile.TemporaryDirectory(prefix="video-library-frames-") as temp:
-                samples = media.sample_window(
-                    Path(video["path"]), window, cfg.frames_per_window, cfg.max_side, Path(temp)
+                samples, used_proxy = self._proxies.sample_window(
+                    video, window, cfg.frames_per_window, cfg.max_side, Path(temp)
                 )
                 prompt = prompts.VISUAL.replace(
                     "{timestamps}", ", ".join(f"{t / 1000:.3f}" for t, _ in samples)
@@ -257,6 +264,8 @@ class Indexer:
                         if attempt:
                             raise
                 data["sampled_at_ms"] = [t for t, _ in samples]
+                if used_proxy:
+                    data["analysis_proxy"] = asdict(self.config.proxy)
                 data["timing_precision"] = "sampled_window; actions are not precisely localized"
                 text = "\n".join(
                     [
@@ -325,7 +334,12 @@ class Indexer:
                             a_ms,
                             b_ms,
                             span["text"],
-                            {"words": words, "language": "en", "timing_precision": "estimated_asr"},
+                            {
+                                "words": words,
+                                "language": span.get("language"),
+                                "chunk_language": span.get("chunk_language"),
+                                "timing_precision": "estimated_asr",
+                            },
                         )
                     )
                 self.store.db.execute(
@@ -337,8 +351,8 @@ class Indexer:
     def _ocr(self, video, backend, checkpoint):
         cfg = self.config.ocr
         duration = video["metadata"]["duration_ms"]
-        for t_ms, image in media.sampled_frames(
-            Path(video["path"]), cfg.sample_fps, cfg.max_side, checkpoint
+        for t_ms, image, used_proxy in self._proxies.sampled_frames(
+            video, cfg.sample_fps, cfg.max_side, checkpoint
         ):
             self._check()
             if t_ms >= duration:
@@ -360,7 +374,12 @@ class Indexer:
                             {
                                 "lines": lines,
                                 "sampled_at_ms": t_ms,
-                                "timing_precision": "single_frame_observation",
+                                "timing_precision": (
+                                    "proxy_frame_observation; source_time_approximate"
+                                    if used_proxy and self.config.proxy.max_fps
+                                    else "single_frame_observation"
+                                ),
+                                "analysis_proxy": asdict(self.config.proxy),
                             },
                         )
                     )

@@ -9,13 +9,14 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP, Image
 
 from . import library, media
+from .index_storage import index_path
 from .store import Store
 
 INSTRUCTIONS = """Explore local indexed video libraries. Start with list_libraries, then library_overview to see coverage
 and summaries. For open-ended questions, browse list_events and object_inventory rather than relying
 only on text similarity. Drill into nodes with inspect_item and list_children. Search across visual
-descriptions, English speech and English OCR using search_library. Query in English for best word
-matches; semantic queries may be multilingual. Verify important observations with get_frame.
+descriptions, speech in its original language and English OCR using search_library. Use the transcript
+language for exact speech word matches and English for visual descriptions; semantic queries may be multilingual. Verify important observations with get_frame.
 All tool time parameters are SECONDS. IDs refer to indexed evidence, not exact action boundaries.
 The index uses sparse sampled frames: a missing observation never proves an event did not occur.
 Object frequencies count windows, not visits. Hierarchy groups are model-proposed summaries; large
@@ -70,7 +71,7 @@ def build_server(folder: str | Path, model_access=None, registry=None):
                     "folder": lib["path"],
                     "selected_in_ui": lib["id"] == selected,
                     "available": Path(lib["path"]).is_dir(),
-                    "index_available": (Path(lib["path"]) / ".video-agent" / "library-v2.sqlite3").is_file(),
+                    "index_available": index_path(lib["path"]).is_file(),
                 }
                 for lib in libraries
             ]

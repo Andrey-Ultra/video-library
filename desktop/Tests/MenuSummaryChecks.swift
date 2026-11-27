@@ -23,6 +23,24 @@ import Foundation
   }
 
   static func main() throws {
+    let stageProgress = try snapshot(["progress": ["fraction": 0.2, "stage_eta_s": 120,
+      "stage_eta_name": "ocr", "stage_eta_status": "estimated"]]).progress
+    precondition(stageProgress.remainingLabel == "~2m 0s left · On-screen text")
+    let totalProgress = try snapshot(["progress": ["fraction": 0.2, "eta_s": 240,
+      "stage_eta_s": 120, "stage_eta_name": "ocr"]]).progress
+    precondition(totalProgress.remainingLabel == "~4m 0s remaining")
+    let resources = try JSONDecoder().decode(ModelResources.self, from: Data("""
+      {"hardware":{"supported":true,"chip":"Apple M4","memory_gb":16,"cpu_cores":10},
+       "models":[],"required":[],"recommended":{"visual":{"model":"suggested"},
+       "proxy":{"resolution":"original"},"runtime":{"cache_dir":"default"},"answer":{"model":"default"}}}
+      """.utf8))
+    let original: JSONValue = .object(["proxy": .object(["resolution": .string("720p"), "max_fps": .number(15)]),
+      "runtime": .object(["cache_dir": .string("/chosen/cache")]),
+      "answer": .object(["model": .string("existing-answer")])])
+    let suggested = resources.suggestedConfig(preserving: original)
+    precondition(suggested["proxy"] == original["proxy"] && suggested["runtime"] == original["runtime"])
+    precondition(suggested["answer"] == original["answer"] && suggested["visual"]["model"].string == "suggested")
+    precondition(resources.hardware.description == "Apple M4 · 16 GB memory")
     let loading = FolderMenuSummary(nil)
     precondition(loading.status == "Opening library…" && loading.workPercent == nil)
     let empty = FolderMenuSummary(try snapshot())

@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 
-DB_NAME = "library-v2.sqlite3"
+from .index_storage import (
+    CONFIG_NAME,
+    DB_NAME,
+    INDEX_DIRECTORY,
+    index_access,
+    index_path,
+    migrate_legacy_index,
+)
+
 STAGES = ("visual", "speech", "ocr", "hierarchy", "embedding")
 DEPENDENTS = {
     "visual": ("hierarchy", "embedding"),
@@ -17,25 +29,38 @@ DEPENDENTS = {
 
 
 class Store:
-    def __init__(self, folder: str | Path, create: bool = True):
+    def __init__(self, folder: str | Path, create: bool = True, blocking: bool = True):
         self.readonly = not create
         self.folder = Path(folder).expanduser().resolve()
         if not self.folder.is_dir():
             raise NotADirectoryError(self.folder)
-        self.directory = self.folder / ".video-agent"
-        self.path = self.directory / DB_NAME
         if create:
-            self.directory.mkdir(exist_ok=True)
-            self.db = sqlite3.connect(self.path, timeout=30)
-        else:
-            if not self.path.exists():
-                raise FileNotFoundError(f"Index not found. Run: python main.py '{self.folder}'")
-            self.db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=30)
-        self.db.row_factory = sqlite3.Row
-        self.db.execute("PRAGMA foreign_keys=ON")
-        if create:
-            self.db.execute("PRAGMA journal_mode=WAL")
-            self._schema()
+            migrate_legacy_index(self.folder)
+        # Readers must not see a newly created SQLite file until its schema is
+        # committed. Downgrade to a shared lease once initialization is complete.
+        self._access = index_access(self.folder, exclusive=create, blocking=blocking)
+        access_lock = self._access.__enter__()
+        try:
+            self.path = self.folder / INDEX_DIRECTORY / DB_NAME if create else index_path(self.folder)
+            self.directory = self.path.parent
+            if create:
+                self.directory.mkdir(exist_ok=True)
+                self.db = sqlite3.connect(self.path, timeout=30)
+            else:
+                if not self.path.exists():
+                    raise FileNotFoundError(f"Index not found. Run: python main.py '{self.folder}'")
+                self.db = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=30)
+            self.db.row_factory = sqlite3.Row
+            self.db.execute("PRAGMA foreign_keys=ON")
+            if create:
+                self.db.execute("PRAGMA journal_mode=WAL")
+                self._schema()
+                fcntl.flock(access_lock.fileno(), fcntl.LOCK_SH)
+        except BaseException:
+            if hasattr(self, "db"):
+                self.db.close()
+            self._access.__exit__(None, None, None)
+            raise
 
     def __enter__(self):
         if self.readonly:
@@ -45,7 +70,10 @@ class Store:
         return self
 
     def __exit__(self, *_):
-        self.db.close()
+        try:
+            self.db.close()
+        finally:
+            self._access.__exit__(None, None, None)
 
     def _schema(self):
         self.db.executescript("""
@@ -108,13 +136,79 @@ class Store:
         )
         self.db.commit()
 
+    def _write_config_snapshot(self, config):
+        # SQLite is authoritative. JSON is an atomic, human-readable copy in the
+        # same folder; file statuses/checkpoints stay in the transactional DB.
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.directory, prefix=".config-", suffix=".tmp", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                json.dump(config, stream, ensure_ascii=False, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.directory / CONFIG_NAME)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    @contextlib.contextmanager
+    def _config_update(self, config):
+        previous = self.saved_config()
+        self._write_config_snapshot(config)
+        try:
+            with self.db:
+                yield
+        except BaseException:
+            # If the DB transaction fails, restore its human-readable mirror too.
+            with contextlib.suppress(OSError):
+                if previous is None:
+                    (self.directory / CONFIG_NAME).unlink(missing_ok=True)
+                else:
+                    self._write_config_snapshot(previous)
+            raise
+
     def save_config(self, config: dict):
-        with self.db:
+        with self._config_update(config):
             self.db.execute("INSERT OR REPLACE INTO settings VALUES('config',?)", (json.dumps(config),))
 
     def saved_config(self) -> dict | None:
         row = self.db.execute("SELECT value FROM settings WHERE key='config'").fetchone()
-        return json.loads(row[0]) if row else None
+        if row:
+            return json.loads(row[0])
+        path = self.directory / CONFIG_NAME
+        if path.is_file():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise ValueError(f"Could not read saved indexing settings: {path}") from exc
+            if not isinstance(value, dict):
+                raise ValueError("Saved indexing settings must be an object")
+            return value
+        return None
+
+    def apply_config(self, config, signatures):
+        """Reset affected stages atomically, preserving other evidence/vectors."""
+        with self._config_update(config):
+            for (video_id,) in self.db.execute("SELECT id FROM videos"):
+                current = {
+                    r[0]: r[1]
+                    for r in self.db.execute(
+                        "SELECT name,signature FROM stages WHERE video_id=?", (video_id,)
+                    )
+                }
+                changed = {name for name in STAGES if name in current and current[name] != signatures[name]}
+                affected = changed | {dependent for name in changed for dependent in DEPENDENTS[name]}
+                for stage in affected:
+                    self._invalidate_stage(video_id, stage, clear_vectors="embedding" in changed)
+                for stage in STAGES:
+                    self.db.execute(
+                        "INSERT OR IGNORE INTO stages(video_id,name,signature,status) VALUES(?,?,?,'pending')",
+                        (video_id, stage, signatures[stage]),
+                    )
+            self.db.execute("INSERT OR REPLACE INTO settings VALUES('config',?)", (json.dumps(config),))
 
     def register(self, path: Path, fingerprint: str, metadata: dict) -> int:
         with self.db:
@@ -178,18 +272,22 @@ class Store:
         result["provenance"] = json.loads(result.get("provenance", "{}"))
         return result
 
+    def _invalidate_stage(self, video_id, stage, clear_vectors):
+        self.db.execute("DELETE FROM work_cache WHERE video_id=? AND stage=?", (video_id, stage))
+        if stage == "embedding":
+            if clear_vectors:
+                self.db.execute(
+                    "DELETE FROM vectors WHERE item_id IN (SELECT id FROM items WHERE video_id=?)",
+                    (video_id,),
+                )
+        else:
+            self.db.execute("DELETE FROM items WHERE video_id=? AND stage=?", (video_id, stage))
+        self.db.execute("DELETE FROM stages WHERE video_id=? AND name=?", (video_id, stage))
+
     def invalidate(self, video_id: int, name: str):
         with self.db:
             for stage in (name, *DEPENDENTS[name]):
-                self.db.execute("DELETE FROM work_cache WHERE video_id=? AND stage=?", (video_id, stage))
-                if stage == "embedding":
-                    self.db.execute(
-                        "DELETE FROM vectors WHERE item_id IN (SELECT id FROM items WHERE video_id=?)",
-                        (video_id,),
-                    )
-                else:
-                    self.db.execute("DELETE FROM items WHERE video_id=? AND stage=?", (video_id, stage))
-                self.db.execute("DELETE FROM stages WHERE video_id=? AND name=?", (video_id, stage))
+                self._invalidate_stage(video_id, stage, clear_vectors=name == "embedding")
 
     def prepare(self, video_id: int, name: str, signature: str, force: bool = False, provenance=None):
         current = self.stage(video_id, name)

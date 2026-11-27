@@ -9,6 +9,8 @@ import tomllib
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
+from .speech_options import PARAKEET_V3, WHISPER_LANGUAGES
+
 
 @dataclass
 class VisualConfig:
@@ -26,7 +28,8 @@ class VisualConfig:
 @dataclass
 class SpeechConfig:
     backend: str = "parakeet"
-    model: str = "mlx-community/parakeet-tdt-0.6b-v2"
+    model: str = PARAKEET_V3
+    language: str = "auto"
     chunk_s: float = 120.0
     device: str = "cuda"
     compute_type: str = "float16"
@@ -64,6 +67,17 @@ class AnswerConfig:
 
 
 @dataclass
+class ProxyConfig:
+    resolution: str = "original"
+    max_fps: int = 0
+    cache_mb: int = 512
+
+    @property
+    def enabled(self):
+        return self.resolution != "original" or self.max_fps != 0
+
+
+@dataclass
 class RuntimeConfig:
     cache_dir: str = ".cache/models"
 
@@ -77,6 +91,7 @@ class Config:
     hierarchy: HierarchyConfig = field(default_factory=HierarchyConfig)
     answer: AnswerConfig = field(default_factory=AnswerConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     def validate(self):
         choices = {
@@ -89,6 +104,29 @@ class Config:
         for section, allowed in choices.items():
             if getattr(self, section).backend not in allowed:
                 raise ValueError(f"{section}.backend must be one of {sorted(allowed)}")
+        if not isinstance(self.proxy.resolution, str) or self.proxy.resolution not in {
+            "original",
+            "1080p",
+            "720p",
+        }:
+            raise ValueError("proxy.resolution must be original, 1080p or 720p")
+        if type(self.proxy.max_fps) is not int or self.proxy.max_fps not in {0, 30, 15, 5}:
+            raise ValueError("proxy.max_fps must be 0 (original), 30, 15 or 5")
+        if type(self.proxy.cache_mb) is not int or self.proxy.cache_mb < 16:
+            raise ValueError("proxy.cache_mb must be an integer of at least 16 MB")
+        if not isinstance(self.speech.language, str) or self.speech.language not in {
+            "auto",
+            *WHISPER_LANGUAGES,
+        }:
+            raise ValueError("speech.language must be 'auto' or a supported language code")
+        if self.speech.backend == "parakeet" and self.speech.language != "auto":
+            raise ValueError("Parakeet determines the language automatically; use speech.language = 'auto'")
+        if (
+            self.speech.backend == "faster-whisper"
+            and self.speech.model.endswith(".en")
+            and self.speech.language not in {"auto", "en"}
+        ):
+            raise ValueError("This Whisper model is English-only; choose a multilingual model")
         for name, value in (
             ("window_s", self.visual.window_s),
             ("sample_fps", self.ocr.sample_fps),
@@ -151,6 +189,13 @@ def load_config(path: str | Path | None = None, profile: str | None = None) -> C
             allowed = {f.name for f in fields(target)}
             if set(settings) - allowed:
                 raise ValueError(f"Unknown settings in [{section}]: {sorted(set(settings) - allowed)}")
+            # Saved Whisper configs predating language selection always used English.
+            if (
+                section == "speech"
+                and settings.get("backend") == "faster-whisper"
+                and "language" not in settings
+            ):
+                target.language = "en"
             for name, value in settings.items():
                 setattr(target, name, value)
     base = Path(path).resolve().parent if path else Path(__file__).resolve().parent.parent
@@ -168,3 +213,36 @@ def signature(*values) -> str:
 
 def is_apple_silicon() -> bool:
     return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def parse_config(raw):
+    """Validate a saved config, including legacy language defaults and JSON numbers."""
+    if not isinstance(raw, dict):
+        raise ValueError("Configuration must be an object")
+    config = load_config()
+    for section, values in raw.items():
+        if section not in {f.name for f in fields(config)} or not isinstance(values, dict):
+            raise ValueError(f"Unknown config section: {section}")
+        target = getattr(config, section)
+        if section == "speech" and values.get("backend") == "faster-whisper" and "language" not in values:
+            target.language = "en"
+        allowed = {f.name for f in fields(target)}
+        for key, value in values.items():
+            if key not in allowed:
+                raise ValueError(f"Unknown setting: {section}.{key}")
+            current = getattr(target, key)
+            if isinstance(current, bool):
+                valid = isinstance(value, bool)
+            elif isinstance(current, (int, float)):
+                valid = isinstance(value, (int, float)) and not isinstance(value, bool)
+                if isinstance(current, int):
+                    valid = valid and isinstance(value, int)
+            else:
+                valid = isinstance(value, str)
+            if not valid:
+                raise ValueError(f"Invalid type: {section}.{key}")
+            if isinstance(current, float):
+                value = float(value)
+            setattr(target, key, value)
+    config.validate()
+    return config

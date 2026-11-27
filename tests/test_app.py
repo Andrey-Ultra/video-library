@@ -126,7 +126,8 @@ app_worker.main()
 """
 
     def spawn(args, **kwargs):
-        assert args[1:3] == ["-m", "video_agent.app_worker"]
+        if args[1:3] != ["-m", "video_agent.app_worker"]:
+            return original(args, **kwargs)
         child = original([args[0], "-c", script, *args[3:]], **kwargs)
         children.append(child)
         return child
@@ -382,9 +383,12 @@ def test_queue_failure_does_not_block_next_library_and_settings_are_captured(wor
     changed = {**original, "visual": {**original["visual"], "model": "changed-after-enqueue"}}
     state.save_config(second["id"], changed)
     assert state.job(b["id"])["config"] == original
+    assert state.job(b["id"])["status"] == "cancelled"
+    replacement = state.launch(second["id"])
+    assert replacement["id"] != b["id"] and replacement["config"] == changed
     shutil.rmtree(folder)
     state.resume_queue()
-    wait_for(lambda: state.job(b["id"])["status"] == "complete")
+    wait_for(lambda: state.job(replacement["id"])["status"] == "complete")
     assert state.job(a["id"])["status"] == "failed"
     assert "unavailable" in state.job(a["id"])["error"]
     assert state.job(b["id"])["config"] == original
@@ -415,7 +419,7 @@ def test_queue_actions_reject_cross_site_and_invalid_reordering(worker_library):
         == 400
     )
     assert client.post(f"/api/jobs/{job['id']}/remove", headers=HEADERS).json()["status"] == "cancelled"
-    assert state.queue_paused()
+    assert not state.queue_paused()
 
 
 def test_paused_task_can_be_reordered_and_resume_uses_visible_order(worker_library, fake_worker):
@@ -462,3 +466,29 @@ def test_reorder_includes_interrupted_tasks_even_with_equal_old_positions(worker
     assert [j["id"] for j in state.queue_jobs()] == [b["id"], a["id"]]
     state.move_job(a["id"], "up")
     assert [j["id"] for j in state.queue_jobs()] == [a["id"], b["id"]]
+
+
+def test_removing_last_waiting_task_resets_pause_and_next_scan_starts(worker_library, fake_worker):
+    state, lib, folder = worker_library
+    state.pause_queue()
+    old = state.launch(lib["id"])
+    state.remove_job(old["id"])
+    assert state.queue_jobs() == [] and not state.queue_paused()
+    scan = state.launch(lib["id"], "refresh")
+    wait_for(lambda: state.job(scan["id"])["status"] == "complete")
+    with Store(folder, create=False) as store:
+        assert len(store.videos()) == 1
+
+
+def test_deleting_last_queued_library_does_not_pause_new_library(worker_library, fake_worker):
+    state, lib, folder = worker_library
+    config = state.library(lib["id"])["config"]
+    state.pause_queue()
+    state.launch(lib["id"])
+    state.remove_library(lib["id"])
+    assert state.libraries() == [] and not state.queue_paused()
+    second, second_folder = queued_library(state, folder.parent, "new-library", config)
+    job = state.launch(second["id"], "refresh")
+    wait_for(lambda: state.job(job["id"])["status"] == "complete")
+    with Store(second_folder, create=False) as store:
+        assert len(store.videos()) == 1

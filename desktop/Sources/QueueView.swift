@@ -35,7 +35,8 @@ struct QueueDock: View {
           } else {
             Text(
               queue?.pendingCount ?? 0 > 0
-                ? "Tasks and checkpoints are saved." : "Queue empty · browse any library"
+                ? (queue?.paused == true ? "Choose Resume queue to start pending tasks." : "Tasks and checkpoints are saved.")
+                : "Queue empty · browse any library"
             )
             .font(.system(size: 11)).foregroundStyle(Palette.muted)
           }
@@ -44,12 +45,8 @@ struct QueueDock: View {
           HStack {
             Text(running?.progress.map { "\(Int($0.fraction * 100))% · layer coverage" } ?? "")
             Spacer()
-            Text(
-              running?.progress?.eta_s.map { "~\(duration($0)) remaining" }
-                ?? (running == nil
-                  ? ""
-                  : running?.progress?.eta_status == "recalibrating"
-                    ? "ETA · recalibrating" : "ETA · calibrating"))
+            Text(running?.progress?.remainingLabel ?? (running == nil ? "" : "ETA · measuring current stage"))
+              .help("The whole-library estimate appears once all pending layers have measured rates. Until then, this shows the current layer across its remaining videos.")
           }.font(.system(size: 10)).foregroundStyle(Palette.muted)
           ProgressView(value: running?.progress?.fraction ?? 0).tint(Palette.accent)
             .accessibilityLabel("Current task progress")
@@ -114,7 +111,8 @@ struct QueueDock: View {
       } label: {
         VStack(alignment: .leading, spacing: 4) {
           Text(task.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-          Text(task.error ?? (task.kind == "refresh" ? "Scan folder" : "Index library"))
+          Text(task.error ?? (task.status == "queued" && queue?.paused == true
+            ? "Waiting for Resume queue" : task.kind == "refresh" ? "Scan folder" : "Index library"))
             .font(.system(size: 10)).foregroundStyle(Palette.muted).lineLimit(1)
         }.frame(maxWidth: .infinity, alignment: .leading)
       }.buttonStyle(.plain).help(task.error ?? task.folder)

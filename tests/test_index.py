@@ -38,7 +38,7 @@ def test_windows_cover_tail_without_redundant_last_window(duration, expected):
 def test_discovery_ignores_appledouble_hidden_and_symlinks(tmp_path):
     (tmp_path / "a.MP4").touch()
     (tmp_path / "._a.MP4").touch()
-    hidden = tmp_path / ".video-agent"
+    hidden = tmp_path / ".video-library"
     hidden.mkdir()
     (hidden / "cached.mp4").touch()
     (tmp_path / "link.mp4").symlink_to(tmp_path / "a.MP4")
@@ -519,3 +519,143 @@ def test_hierarchy_resume_reuses_validated_group_cache(tmp_path, config, fake_me
         assert Indexer(store, config, fake_media).run()["complete"] == 1
         assert model.group_calls == 1
         assert store.items(1, kind="summary")
+
+
+def test_multilingual_speech_storage_search_and_selective_rebuild(tmp_path, config, fake_media):
+    from video_agent.signatures import stage_signatures
+    from video_agent.speech_options import PARAKEET_V2, PARAKEET_V3
+
+    class MultilingualSpeech(FakeSpeech):
+        def transcribe(self, audio):
+            return [
+                {
+                    "start_s": 1,
+                    "end_s": 2,
+                    "text": "Привет лес",
+                    "language": None,
+                    "words": [{"start_s": 1, "end_s": 2, "text": "Привет"}],
+                },
+                {"start_s": 3, "end_s": 4, "text": "Hello forest", "language": None, "words": []},
+            ]
+
+    config.speech.model = PARAKEET_V2
+    with Store(tmp_path) as store:
+        Indexer(store, config, fake_media).run()
+        old = {name: store.stage(1, name) for name in ("visual", "ocr", "hierarchy")}
+        old_signature = stage_signatures(config)["speech"]
+        fake_media["speech"] = lambda _: MultilingualSpeech()
+        config.speech.model = PARAKEET_V3
+        assert stage_signatures(config)["speech"] != old_signature
+        result = Indexer(store, config, fake_media).run()
+        assert result["complete"] == 1 and not result["errors"]
+        assert FakeGenerator.calls == 3  # no visual/tree recomputation
+        assert {name: store.stage(1, name) for name in old} == old
+        spans = store.items(1, stage="speech")
+        assert [s["text"] for s in spans] == ["Привет лес", "Hello forest"]
+        assert all(s["payload"]["language"] is None for s in spans)
+        assert spans[0]["start_ms"] == 1000 and spans[0]["end_ms"] == 2000
+        assert spans[0]["payload"]["words"][0]["start_s"] == 1
+        hits = library.search(store, config, "Привет", source="speech", lexical_only=True)["hits"]
+        assert hits and hits[0]["text"] == "Привет лес"
+        assert Indexer(store, config, fake_media).run()["complete"] == 1
+        assert store.count_items(1, "speech") == 2  # rerun does not duplicate transcripts
+
+
+def test_proxy_routes_only_video_analysis_and_is_removed_after_run(tmp_path, config, fake_media, monkeypatch):
+    from video_agent.config import ProxyConfig
+    from video_agent.proxy import ProxyCache
+
+    proxy_paths, video_inputs, audio_inputs = [], [], []
+
+    def proxy_source(self, video):
+        path = self.directory / "fake-proxy.mp4"
+        path.touch()
+        proxy_paths.append(path)
+        return path
+
+    monkeypatch.setattr(ProxyCache, "source", proxy_source)
+    monkeypatch.setattr(media, "audio_chunk", lambda path, *args: audio_inputs.append(path))
+
+    def frames(path, *args):
+        video_inputs.append(path)
+        return iter([(0, None)])
+
+    def window(path, bounds, *args):
+        video_inputs.append(path)
+        return [(bounds.start_ms + 1, Path("unused.jpg"))]
+
+    monkeypatch.setattr(media, "sampled_frames", frames)
+    monkeypatch.setattr(media, "sample_window", window)
+    config.proxy = ProxyConfig("720p", 5)
+    with Store(tmp_path) as store:
+        result = Indexer(store, config, fake_media).run()
+        assert result["complete"] == 1 and not result["errors"]
+        assert video_inputs and all(p.name == "fake-proxy.mp4" for p in video_inputs)
+        assert audio_inputs == [tmp_path / "source.mp4"]
+        assert all(not p.parent.exists() for p in proxy_paths)
+        assert store.stage(1, "visual")["provenance"]["analysis_proxy"] == {
+            "resolution": "720p",
+            "max_fps": 5,
+            "cache_mb": 512,
+        }
+
+
+def test_missing_model_capacity_stops_task_instead_of_retrying_every_video(tmp_path, config, fake_media):
+    from video_agent.backends.common import ModelSetupError
+
+    (tmp_path / "another.mp4").write_bytes(b"second video")
+    calls = []
+
+    class Unavailable(FakeSpeech):
+        def transcribe(self, audio):
+            calls.append(audio)
+            raise ModelSetupError("Free 3 GB for the speech model")
+
+    fake_media["speech"] = lambda _: Unavailable()
+    with Store(tmp_path) as store:
+        with pytest.raises(ModelSetupError, match="3 GB"):
+            Indexer(store, config, fake_media).run()
+        assert len(calls) == 1
+        assert sum(store.stage(v["id"], "speech")["status"] == "failed" for v in store.videos()) == 1
+
+
+def test_speech_settings_reuses_other_layer_vectors_and_does_not_rerun_models(tmp_path, config, fake_media):
+    from video_agent.signatures import stage_signatures
+
+    encoded = []
+
+    class TrackingEmbedder(FakeEmbedder):
+        def encode(self, texts, query=False):
+            encoded.extend(texts)
+            return super().encode(texts, query)
+
+    fake_media["embedding"] = lambda _: TrackingEmbedder()
+    with Store(tmp_path) as store:
+        Indexer(store, config, fake_media).run()
+        encoded.clear()
+        config.speech.model = "replacement-speech-model"
+        store.apply_config(asdict(config), stage_signatures(config))
+        assert Indexer(store, config, fake_media).run()["complete"] == 1
+        assert encoded == ["Welcome to the forest"]
+        assert FakeGenerator.calls == 3
+
+
+def test_restored_folder_resumes_partial_visual_without_losing_first_window(tmp_path, config, fake_media):
+    from video_agent.app_state import AppState
+    from video_agent.config import parse_config
+
+    FakeGenerator.fail_at = 2
+    with Store(tmp_path) as store:
+        Indexer(store, config, fake_media).run()
+        assert store.stage(1, "visual")["checkpoint"] == 1
+        saved = store.items(1, stage="visual")[0]
+    registry = AppState(tmp_path.parent / (tmp_path.name + "-new-registry"))
+    inspected = registry.inspect_folder(str(tmp_path))
+    assert inspected["has_saved_config"] and registry.libraries() == []
+    lib = registry.select(str(tmp_path))
+    FakeGenerator.fail_at = None
+    with Store(tmp_path) as store:
+        result = Indexer(store, parse_config(lib["config"]), fake_media).run()
+        assert result["complete"] == 1
+        assert store.item(saved["id"])["text"] == saved["text"]
+        assert FakeGenerator.calls == 4

@@ -7,7 +7,7 @@ import SwiftUI
   @Published var error: String?
   @Published var baseURL: URL?
   @Published var selectedVideo: Int?
-  @Published var settingsShown = false
+  @Published var indexSettings: IndexSettingsSession?
   @Published var mcpShown = false
   @Published var refreshing = false
   @Published var queueExpanded = false
@@ -16,6 +16,7 @@ import SwiftUI
   private var monitor: Task<Void, Never>?
   private var errorLog: FileHandle?
   private var clipWindows: [ClipRoute: ClipWindowController] = [:]
+  private var reportedJobFailures = Set<String>()
   let project: URL
   let stateDirectory: URL
   init() {
@@ -168,6 +169,12 @@ import SwiftUI
   func reload() async throws {
     let value: Snapshot = try await request("api/state")
     if state != value { state = value }
+    if error == nil, let job = value.job, job.status == "failed",
+      let detail = job.error, !detail.isEmpty, !reportedJobFailures.contains(job.id)
+    {
+      reportedJobFailures.insert(job.id)
+      error = detail
+    }
   }
   func perform(_ action: @escaping @MainActor () async throws -> Void) {
     Task {
@@ -189,6 +196,86 @@ import SwiftUI
       }
     }
   }
+  func addFolder(_ path: String) {
+    perform {
+      let inspected: FolderInspection = try await self.request(
+        "api/libraries/inspect", method: "POST", body: .object(["path": .string(path)]))
+      if inspected.has_saved_config {
+        let library: Library = try await self.request(
+          "api/libraries", method: "POST", body: .object(["path": .string(inspected.path)]))
+        self.selectedVideo = nil
+        if inspected.needs_resume ?? true {
+          guard try await self.ensureIndexModels(library) else { return }
+          let _: JSONValue = try await self.request(
+            "api/libraries/\(library.id)/jobs", method: "POST", body: .object(["kind": .string("index")]))
+        }
+      } else {
+        self.indexSettings = IndexSettingsSession(path: inspected.path, libraryID: inspected.library_id,
+          config: inspected.config, initialSetup: true)
+      }
+    }
+  }
+  func editIndexSettings(_ library: Library) {
+    indexSettings = IndexSettingsSession(path: library.path, libraryID: library.id,
+      config: library.config, initialSetup: false)
+  }
+  func confirmDeleteIndex(_ library: Library) {
+    confirmDeleteLibrary(library, indexOnly: true)
+  }
+  func confirmDeleteLibrary(_ library: Library, indexOnly: Bool = false) {
+    let alert = NSAlert()
+    alert.messageText = indexOnly ? "Delete index for “\(library.name)”?"
+      : "Delete library “\(library.name)” and its index?"
+    alert.informativeText = indexOnly
+      ? "This deletes all saved indexing data and removes waiting tasks for this folder. The folder stays in Libraries and its indexing setup opens next. Original videos stay unchanged."
+      : "This removes the folder from Libraries and deletes its saved index, including descriptions, transcripts and search data. Waiting tasks for this folder will be removed. Original videos stay unchanged."
+    alert.alertStyle = .warning
+    alert.addButton(withTitle: indexOnly ? "Delete index" : "Delete library and index")
+    alert.addButton(withTitle: "Cancel")
+    alert.buttons.first?.hasDestructiveAction = true
+    alert.buttons.first?.keyEquivalent = ""
+    alert.buttons.last?.keyEquivalent = "\r"
+    if let window = NSApp.keyWindow {
+      alert.beginSheetModal(for: window) { [weak self] response in
+        if response == .alertFirstButtonReturn {
+          if indexOnly { self?.deleteIndex(library) } else { self?.deleteLibrary(library) }
+        }
+      }
+    } else if alert.runModal() == .alertFirstButtonReturn {
+      if indexOnly { deleteIndex(library) } else { deleteLibrary(library) }
+    }
+  }
+  private func deleteIndex(_ library: Library) {
+    perform {
+      let result: IndexResetResult = try await self.request(
+        "api/libraries/\(library.id)/index", method: "DELETE",
+        body: .object(["confirmed": .bool(true)]))
+      for route in self.clipWindows.keys.filter({ $0.libraryID == library.id }) {
+        self.clipWindows[route]?.pausePlayback?()
+        self.clipWindows[route]?.close()
+      }
+      self.selectedVideo = nil
+      try await self.reload()
+      self.indexSettings = IndexSettingsSession(path: result.library.path,
+        libraryID: result.library.id, config: result.library.config, initialSetup: true)
+      if !result.warnings.isEmpty { self.error = result.warnings.joined(separator: "\n") }
+    }
+  }
+  private func deleteLibrary(_ library: Library) {
+    perform {
+      let result: JSONValue = try await self.request(
+        "api/libraries/\(library.id)", method: "DELETE",
+        body: .object(["confirmed": .bool(true)]))
+      for route in self.clipWindows.keys.filter({ $0.libraryID == library.id }) {
+        self.clipWindows[route]?.pausePlayback?()
+        self.clipWindows[route]?.close()
+      }
+      if library.id == self.state?.active_id { self.selectedVideo = nil }
+      if case .array(let warnings) = result["warnings"], !warnings.isEmpty {
+        self.error = warnings.map { $0.string }.joined(separator: "\n")
+      }
+    }
+  }
   func chooseFolder() {
     let panel = NSOpenPanel()
     panel.canChooseFiles = false
@@ -198,13 +285,26 @@ import SwiftUI
     panel.prompt = "Open library"
     panel.begin { [weak self] result in
       if result == .OK, let url = panel.url {
-        Task { @MainActor in self?.selectFolder(url.path, scan: true) }
+        Task { @MainActor in self?.addFolder(url.path) }
       }
     }
   }
+  func ensureIndexModels(_ library: Library) async throws -> Bool {
+    let assets: ModelResources = try await request("api/models/status", method: "POST",
+      body: .object(["config": library.config]))
+    if assets.models.contains(where: { assets.required.contains($0.id) && $0.status != "ready" }) {
+      editIndexSettings(library)
+      return false
+    }
+    return true
+  }
   func run(_ kind: String = "index") {
-    guard let id = state?.active_id else { return }
+    guard let library = state?.active else { return }
+    let id = library.id
     perform {
+      if kind == "index" {
+        guard try await self.ensureIndexModels(library) else { return }
+      }
       let _: JSONValue = try await self.request(
         "api/libraries/\(id)/jobs", method: "POST", body: .object(["kind": .string(kind)]))
     }
@@ -228,28 +328,30 @@ import SwiftUI
   func queuedTask(_ libraryID: String) -> QueueTask? {
     state?.queue?.jobs.first { $0.library_id == libraryID && ($0.running || $0.waiting) }
   }
-  func save(_ config: JSONValue) async throws {
-    guard let id = state?.active_id else { return }
-    let _: JSONValue = try await request("api/libraries/\(id)/config", method: "PUT", body: config)
-    try await reload()
-  }
-  func toggle(_ method: IndexMethod, _ enabled: Bool) {
-    guard var config = state?.active?.config else { return }
-    if method.id == "hierarchy" {
-      config["hierarchy"]["enabled"] = .bool(enabled)
+  func saveIndexSettings(_ config: JSONValue, session: IndexSettingsSession) async throws {
+    let id: String
+    if let libraryID = session.libraryID {
+      let _: JSONValue = try await request("api/libraries/\(libraryID)/config", method: "PUT", body: config)
+      id = libraryID
     } else {
-      let preference = "\(state?.active_id ?? "")-\(method.id)-backend"
-      if enabled {
-        config[method.id]["backend"] = .string(
-          UserDefaults.standard.string(forKey: preference) ?? method.backends.first ?? "none")
-      } else {
-        UserDefaults.standard.set(config[method.id]["backend"].string, forKey: preference)
-        config[method.id]["backend"] = .string("none")
-      }
-      if method.id == "visual" && !enabled { config["hierarchy"]["enabled"] = .bool(false) }
+      let library: Library = try await request("api/libraries/configure", method: "POST",
+        body: .object(["path": .string(session.path), "config": config]))
+      id = library.id
     }
-    let saved = config
-    perform { try await self.save(saved) }
+    if session.initialSetup && session.libraryID != nil {
+      let _: Library = try await request("api/libraries", method: "POST",
+        body: .object(["path": .string(session.path)]))
+    }
+    if config != session.config {
+      for route in clipWindows.keys.filter({ $0.libraryID == id }) {
+        clipWindows[route]?.pausePlayback?()
+        clipWindows[route]?.close()
+      }
+      if state?.active_id == id { selectedVideo = nil }
+    }
+    let _: JSONValue = try await request("api/libraries/\(id)/jobs", method: "POST",
+      body: .object(["kind": .string("index")]))
+    try await reload()
   }
   func thumbnail(_ video: Video, libraryID: String? = nil) -> URL? {
     guard let baseURL else { return nil }

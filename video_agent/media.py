@@ -144,20 +144,30 @@ def frame_at(path: Path, time_ms: int, max_side: int = 1280):
 
 def sample_window(path: Path, window: Window, count: int, max_side: int, output: Path):
     """One sequential decode per window, with actual decoded timestamps."""
+    targets = [window.start_ms + (i + 0.5) * (window.end_ms - window.start_ms) / count for i in range(count)]
+    return sample_targets(path, window, targets, max_side, output)
+
+
+def sample_targets(path, window, targets, max_side, output, *, time_offset_ms=0, prefix=""):
+    """Decode target frames, reporting timestamps on the original source timeline."""
     import av
 
-    targets = [window.start_ms + (i + 0.5) * (window.end_ms - window.start_ms) / count for i in range(count)]
+    count = len(targets)
+    if not count:
+        return []
     samples = []
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         origin = float(stream.start_time * stream.time_base) if stream.start_time is not None else 0.0
-        container.seek(int((window.start_ms / 1000 + origin) * 1_000_000), backward=True)
+        container.seek(
+            int((max(0, window.start_ms - time_offset_ms) / 1000 + origin) * 1_000_000), backward=True
+        )
         index = 0
         last = None
         for frame in container.decode(stream):
             if frame.time is None:
                 continue
-            t_ms = round((frame.time - origin) * 1000)
+            t_ms = round((frame.time - origin) * 1000) + time_offset_ms
             if t_ms < window.start_ms:
                 continue
             if t_ms >= window.end_ms:
@@ -170,7 +180,7 @@ def sample_window(path: Path, window: Window, count: int, max_side: int, output:
             if rotation:
                 image = image.rotate(rotation, expand=True)
             image.thumbnail((max_side, max_side))
-            dest = output / f"frame-{len(samples)}.jpg"
+            dest = output / f"{prefix}frame-{len(samples)}.jpg"
             image.save(dest, quality=90)
             samples.append((t_ms, dest))
             while index < count and targets[index] <= t_ms:
@@ -184,7 +194,7 @@ def sample_window(path: Path, window: Window, count: int, max_side: int, output:
             if rotation:
                 image = image.rotate(rotation, expand=True)
             image.thumbnail((max_side, max_side))
-            dest = output / "frame-0.jpg"
+            dest = output / f"{prefix}frame-0.jpg"
             image.save(dest, quality=90)
             samples.append((t_ms, dest))
     if not samples:
@@ -192,7 +202,7 @@ def sample_window(path: Path, window: Window, count: int, max_side: int, output:
     return samples
 
 
-def sampled_frames(path: Path, fps: float, max_side: int, start_ms: int = 0):
+def sampled_frames(path: Path, fps: float, max_side: int, start_ms: int = 0, *, time_offset_ms: int = 0):
     import av
 
     step = 1000 / fps
@@ -203,11 +213,13 @@ def sampled_frames(path: Path, fps: float, max_side: int, start_ms: int = 0):
         stream = container.streams.video[0]
         origin = float(stream.start_time * stream.time_base) if stream.start_time is not None else 0.0
         if start_ms:
-            container.seek(int((start_ms / 1000 + origin) * 1_000_000), backward=True)
+            container.seek(
+                int((max(0, start_ms - time_offset_ms) / 1000 + origin) * 1_000_000), backward=True
+            )
         for frame in container.decode(stream):
             if frame.time is None:
                 continue
-            t_ms = round((frame.time - origin) * 1000)
+            t_ms = round((frame.time - origin) * 1000) + time_offset_ms
             if t_ms < target:
                 continue
             image = frame.to_image().convert("RGB")

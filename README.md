@@ -18,14 +18,20 @@ Source videos stay unchanged.
 - Event trees, summaries, keyword search, and semantic search.
 - A native app for browsing libraries, playing clips, and inspecting indexed evidence.
 - A folder queue with pause and resume from saved checkpoints.
+- Optional temporary 1080p/720p analysis proxies with an FPS cap.
 - MCP tools for choosing libraries, finding clips, and checking source frames.
 
 ## Project status
 
 A working prototype in active development, tested on a **Mac mini M4 / 16 GB**.
-The current focus is English speech and English on-screen text.
+Speech supports automatic recognition of 25 European languages, including English, Russian,
+Ukrainian, Spanish, French, and German, with Parakeet v3. On-screen text and visual descriptions
+still focus on English. Existing libraries keep their saved speech model; select v3 in the folder’s Indexing settings
+to enable multilingual speech, then add the library to the queue to rebuild speech and search.
 
-The desktop app currently supports macOS; the NVIDIA profile is experimental.
+The desktop app targets **Macs with Apple Silicon**. Folder settings offer local model downloads,
+a visual API server option, and suggestions based on the Mac’s chip and memory.
+Models are not bundled. Experimental NVIDIA configuration remains available through the CLI.
 Setup requires the source code; there is no standalone installer yet.
 Models can make mistakes, and sparse frame sampling can miss brief events.
 Video editing and export are outside the current scope.
@@ -41,8 +47,10 @@ pip install -e '.[mac]'
 python main.py ui
 ```
 
-Local models download on first use.
-In the app: **Add folder → Add to queue**. For MCP setup: **Connect your agent**.
+Models are not bundled. In the app: **Add folder → choose models → Download → Start indexing**.
+Downloads show progress, verification and retryable errors. **Suggest for this Mac** offers a starting point based on its chip and memory.
+Folders with a saved index restore their settings; missing local models are offered for download before resuming.
+To change methods later, right-click the folder → **Indexing settings…**. For MCP setup: **Connect your agent**.
 
 [Setup, CLI & MCP — Russian](docs/USAGE.md) · [Benchmarks — Russian](BENCHMARKS.md)
 

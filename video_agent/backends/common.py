@@ -6,6 +6,10 @@ import json
 import numpy as np
 
 
+class ModelSetupError(RuntimeError):
+    """A shared model cannot start; retrying every source file cannot fix it."""
+
+
 def release_mlx():
     gc.collect()
     import mlx.core as mx
@@ -35,3 +39,17 @@ def normalized(array):
     if np.any(norms <= 0):
         raise ValueError("Embedding backend returned a zero vector")
     return result / norms
+
+
+def load_local_model(loader, model):
+    """A model setup failure is shared by all files; stop once with actionable text."""
+    try:
+        return loader(model)
+    except ModelSetupError:
+        raise
+    except Exception as exc:
+        raise ModelSetupError(
+            f"Could not load local model {model} ({type(exc).__name__}). "
+            "Open Indexing settings and check or retry its download. "
+            "Existing indexing checkpoints are saved."
+        ) from exc

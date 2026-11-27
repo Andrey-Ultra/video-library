@@ -14,7 +14,8 @@ max_tokens = 384
 
 [speech]
 backend = "parakeet" # parakeet | faster-whisper | none
-model = "mlx-community/parakeet-tdt-0.6b-v2"
+model = "mlx-community/parakeet-tdt-0.6b-v3"
+language = "auto" # Parakeet: auto; faster-whisper: auto or en, ru, es, fr, de, etc.
 chunk_s = 120.0
 device = "cuda" # faster-whisper only
 compute_type = "float16"
@@ -42,3 +43,9 @@ max_tokens = 768
 
 [runtime]
 cache_dir = ".cache/models"
+
+# Temporary copies used only for visual analysis and OCR. No enlargement or speed change.
+[proxy]
+resolution = "original" # original | 1080p | 720p
+max_fps = 0 # 0 = original; 30 | 15 | 5. Separate from AI/OCR sampling frequency.
+cache_mb = 512 # Temporary proxy cache budget; increase for long videos if disk space permits.

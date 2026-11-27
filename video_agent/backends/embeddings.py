@@ -4,7 +4,7 @@ import gc
 
 import numpy as np
 
-from .common import normalized, release_mlx
+from .common import load_local_model, normalized, release_mlx
 
 QUERY_INSTRUCTION = "Retrieve video observations, events, speech or on-screen text relevant to this query."
 
@@ -19,7 +19,7 @@ class MLXEmbedder:
         from mlx_embeddings.utils import load
 
         if self.model is None:
-            self.model, self.tokenizer = load(self.config.model)
+            self.model, self.tokenizer = load_local_model(load, self.config.model)
         if query:
             texts = [f"Instruct: {QUERY_INSTRUCTION}\nQuery: {t}" for t in texts]
         inputs = self.tokenizer(texts, padding=True, truncation=True, max_length=1024, return_tensors="mlx")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 from contextlib import asynccontextmanager
@@ -13,11 +14,14 @@ from fastapi.responses import FileResponse, Response
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import media
-from .app_state import PROJECT, AppState, parse_config
+from .app_state import AppState, LibraryBusyError, parse_config
 from .config import load_config
+from .index_storage import index_path
+from .model_assets import ModelAssets
 from .progress import ProgressTracker, estimate
 from .signatures import stage_signatures
-from .store import DB_NAME, DEPENDENTS, STAGES, Store
+from .speech_options import speech_options
+from .store import DEPENDENTS, STAGES, Store
 
 
 def snapshot(state, tracker=None, library_id=None, include_queue=True, task=None):
@@ -26,6 +30,7 @@ def snapshot(state, tracker=None, library_id=None, include_queue=True, task=None
     libraries = state.libraries()
     active_id = library_id or state.active_id()
     result = {
+        "speech_options": speech_options(),
         "libraries": libraries,
         "active_id": active_id,
         "videos": [],
@@ -89,7 +94,7 @@ def snapshot(state, tracker=None, library_id=None, include_queue=True, task=None
     if not folder.is_dir():
         result["folder_unavailable"] = True
         return result
-    if not (folder / ".video-agent" / DB_NAME).is_file():
+    if not index_path(folder).is_file():
         return result
     try:
         with Store(folder, create=False) as store:
@@ -162,13 +167,11 @@ def snapshot(state, tracker=None, library_id=None, include_queue=True, task=None
 def create_app(directory=None):
     state = AppState(directory)
     tracker = ProgressTracker()
+    assets = ModelAssets(state.directory)
 
     @asynccontextmanager
     async def lifespan(_):
         state.recover()
-        # Remember the existing project library on the first launch.
-        if not state.libraries() and (PROJECT / "videos").is_dir():
-            state.select(PROJECT / "videos")
         yield
 
     app = FastAPI(
@@ -199,6 +202,10 @@ def create_app(directory=None):
     async def invalid(_, exc):
         return Response(json.dumps({"detail": str(exc)}), status_code=400, media_type="application/json")
 
+    @app.exception_handler(LibraryBusyError)
+    async def library_busy(_, exc):
+        return Response(json.dumps({"detail": str(exc)}), status_code=409, media_type="application/json")
+
     @app.get("/")
     def home():
         return {"app": "Video library", "interface": "native", "status": "ready"}
@@ -207,9 +214,63 @@ def create_app(directory=None):
     def status():
         return snapshot(state, tracker)
 
+    @app.post("/api/models/status")
+    def model_status(body: dict):
+        return assets.resources(body.get("config", {}))
+
+    @app.post("/api/models/download")
+    def download_model(body: dict):
+        return assets.start(body.get("config", {}), body.get("model", ""))
+
+    @app.post("/api/models/delete")
+    def delete_model(body: dict):
+        if body.get("confirmed") is not True:
+            raise ValueError("Confirm deleting the downloaded model first")
+        with state.queue_guard(), (state.directory / "worker.lock").open("a") as lease:
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise LibraryBusyError(
+                    "Models are in use. Pause indexing and close active model requests first."
+                ) from None
+            repo = body.get("model", "")
+            for job in state.queue_jobs():
+                cfg = job.get("config", {})
+                if isinstance(cfg, str):
+                    cfg = json.loads(cfg)
+                if job["status"] in {"queued", "starting", "running", "pausing"} and any(
+                    cfg.get(section, {}).get("model") == repo
+                    and cfg.get(section, {}).get("backend") in {"mlx", "mlx-text", "parakeet"}
+                    for section in ("visual", "speech", "embedding", "answer")
+                ):
+                    raise LibraryBusyError(
+                        "This model is needed by the processing queue. Remove its waiting tasks or pause them first."
+                    )
+            return assets.delete(body.get("config", {}), repo)
+
+    @app.post("/api/libraries/inspect")
+    def inspect_folder(body: dict):
+        return state.inspect_folder(body.get("path", ""))
+
+    @app.post("/api/libraries/configure")
+    def configure_folder(body: dict):
+        return state.configure_library(body.get("path", ""), body.get("config", {}))
+
     @app.post("/api/libraries")
     def select_folder(body: dict):
         return state.select(body.get("path", ""))
+
+    @app.delete("/api/libraries/{library_id}")
+    def remove_library(library_id: str, body: dict):
+        if body.get("confirmed") is not True:
+            raise ValueError("Confirm removal of the library and its saved index first")
+        return state.remove_library(library_id)
+
+    @app.delete("/api/libraries/{library_id}/index")
+    def reset_library_index(library_id: str, body: dict):
+        if body.get("confirmed") is not True:
+            raise ValueError("Confirm deletion of the saved index first")
+        return state.reset_library_index(library_id)
 
     @app.put("/api/libraries/{library_id}/config")
     def settings(library_id: str, body: dict):

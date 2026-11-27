@@ -95,7 +95,7 @@ If evidence is insufficient, say so. NEVER describe spoken content as visually p
 Keep evidence channels separate: kind='speech' is the evidence for audible words;
 kind='ocr' is only writing visible on screen, not proof of what was spoken.
 Label speech, on-screen text and visual observations separately when relevant.
-If translating English speech, say it is a translation and cite a speech item.
+If translating speech, say it is a translation and cite a speech item.
 For a whole-video overview use the provided visual_summary; retrieved windows are selected examples,
 not the full chronological story. Do not list every object in candidate observations.
 Keep the answer under 100 words. Return ONLY one JSON object:

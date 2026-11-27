@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import os
 
-from .common import release_mlx
+from .common import load_local_model, release_mlx
 
 
 class MLXGenerator:
@@ -16,7 +16,7 @@ class MLXGenerator:
         from mlx_vlm.prompt_utils import apply_chat_template
 
         if self.model is None:
-            self.model, self.processor = load(self.config.model)
+            self.model, self.processor = load_local_model(load, self.config.model)
         image_paths = [str(p) for p in images or []]
         formatted = apply_chat_template(
             self.processor, self.model.config, prompt, num_images=len(image_paths)
@@ -97,7 +97,7 @@ class MLXTextGenerator:
         from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
         if self.model is None:
-            self.model, self.tokenizer = load(self.config.model)
+            self.model, self.tokenizer = load_local_model(load, self.config.model)
         formatted = self.tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False,

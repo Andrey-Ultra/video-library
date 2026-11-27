@@ -30,6 +30,7 @@ videos/**
 
 # Local models, library indexes, benchmarks and machine-specific config
 .cache/
+.video-library/
 .video-agent/
 video-agent.toml
 video-library.toml

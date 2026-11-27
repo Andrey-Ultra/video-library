@@ -13,11 +13,12 @@ import sys
 import threading
 import time
 import uuid
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from pathlib import Path
 
-from .config import load_config
-from .store import DB_NAME, Store
+from .config import parse_config
+from .index_storage import CONFIG_NAME, delete_index, index_path
+from .store import Store
 
 PROJECT = Path(__file__).resolve().parent.parent
 
@@ -35,34 +36,8 @@ def state_directory(path=None):
     )
 
 
-def parse_config(raw):
-    config = load_config()
-    for section, values in raw.items():
-        if section not in {f.name for f in fields(config)} or not isinstance(values, dict):
-            raise ValueError(f"Unknown config section: {section}")
-        target = getattr(config, section)
-        allowed = {f.name for f in fields(target)}
-        for key, value in values.items():
-            if key not in allowed:
-                raise ValueError(f"Unknown setting: {section}.{key}")
-            current = getattr(target, key)
-            if isinstance(current, bool):
-                valid = isinstance(value, bool)
-            elif isinstance(current, (int, float)):
-                valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-                if isinstance(current, int):
-                    valid = valid and isinstance(value, int)
-            else:
-                valid = isinstance(value, str)
-            if not valid:
-                raise ValueError(f"Invalid type: {section}.{key}")
-            # JavaScript serializes 10.0 as 10. Keep the dataclass numeric type
-            # so a round-trip through settings does not invalidate every stage.
-            if isinstance(current, float):
-                value = float(value)
-            setattr(target, key, value)
-    config.validate()
-    return config
+class LibraryBusyError(ValueError):
+    pass
 
 
 class AppState:
@@ -123,31 +98,173 @@ class AppState:
     def active_folder(self):
         return Path(self.library()["path"])
 
-    def select(self, path):
+    def inspect_folder(self, path):
         if not isinstance(path, str) or not path.strip():
             raise ValueError("Enter a folder path")
         folder = Path(path).expanduser().resolve()
         if not folder.is_dir():
             raise ValueError("Folder does not exist or is not accessible")
-        config = asdict(load_config())
-        if (folder / ".video-agent" / DB_NAME).is_file():
-            with Store(folder, create=False) as store:
-                config = store.saved_config() or config
         with self.connect() as db:
-            row = db.execute("SELECT id FROM libraries WHERE path=?", (str(folder),)).fetchone()
-            library_id = row[0] if row else uuid.uuid4().hex
-            if not row:
+            registered = db.execute("SELECT id,config FROM libraries WHERE path=?", (str(folder),)).fetchone()
+        saved = None
+        videos = []
+        if index_path(folder).is_file():
+            with Store(folder, create=False) as store:
+                saved = store.saved_config()
+                if saved is not None:
+                    videos = store.videos(limit=1_000_000)
+        else:
+            file = index_path(folder).parent / CONFIG_NAME
+            if file.is_file():
+                try:
+                    saved = json.loads(file.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f"Could not read saved indexing settings: {file}") from exc
+        config = parse_config(
+            saved if saved is not None else json.loads(registered["config"]) if registered else {}
+        )
+        from .signatures import stage_signatures
+        from .store import STAGES
+
+        signatures = stage_signatures(config)
+
+        def unfinished(video):
+            stages = {stage["name"]: stage for stage in video["stages"]}
+            return bool(video["error"]) or any(
+                name not in stages
+                or stages[name]["status"] != "complete"
+                or stages[name]["signature"] != signatures[name]
+                for name in STAGES
+            )
+
+        return {
+            "path": str(folder),
+            "config": asdict(config),
+            "needs_resume": saved is not None and (not videos or any(unfinished(video) for video in videos)),
+            "has_saved_config": saved is not None,
+            "library_id": registered["id"] if registered else None,
+        }
+
+    def select(self, path):
+        with self.queue_guard():
+            inspected = self.inspect_folder(path)
+            with self.connect() as db:
+                library_id = inspected["library_id"] or uuid.uuid4().hex
                 db.execute(
-                    "INSERT INTO libraries VALUES(?,?,?)", (library_id, str(folder), json.dumps(config))
+                    "INSERT INTO libraries VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",
+                    (library_id, inspected["path"], json.dumps(inspected["config"])),
                 )
-            db.execute("INSERT OR REPLACE INTO preferences VALUES('active',?)", (library_id,))
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('active',?)", (library_id,))
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('libraries_initialized','1')")
         return self.library(library_id)
+
+    def configure_library(self, path, raw):
+        config = parse_config(raw)
+        with self.queue_guard():
+            inspected = self.inspect_folder(path)
+            library_id = inspected["library_id"] or uuid.uuid4().hex
+            self._save_folder_settings(library_id, inspected["path"], config, inspected["config"])
+            with self.connect() as db:
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('active',?)", (library_id,))
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('libraries_initialized','1')")
+        return self.library(library_id)
+
+    @staticmethod
+    def _reset_empty_queue(db):
+        if not db.execute(
+            "SELECT 1 FROM jobs WHERE status IN ('queued','starting','running','pausing','paused','interrupted')"
+        ).fetchone():
+            db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','0')")
+
+    def remove_library(self, library_id):
+        """Remove the library and its saved index as one confirmed action."""
+        return self._delete_library_data(library_id, keep_library=False)
+
+    def reset_library_index(self, library_id):
+        """Keep the registered folder/settings, erase its index, and await setup."""
+        return self._delete_library_data(library_id, keep_library=True)
+
+    def _delete_library_data(self, library_id, *, keep_library):
+        with self.queue_guard():
+            library = self.library(library_id)
+            with self.connect() as db:
+                if db.execute(
+                    "SELECT 1 FROM jobs WHERE library_id=? AND status IN ('starting','running','pausing')",
+                    (library_id,),
+                ).fetchone():
+                    raise LibraryBusyError(
+                        "Pause this library’s indexing task and wait for it to stop before deleting its index."
+                    )
+                try:
+                    warnings = delete_index(library["path"])
+                except RuntimeError as exc:
+                    raise LibraryBusyError(str(exc)) from exc
+                db.execute("DELETE FROM jobs WHERE library_id=?", (library_id,))
+                db.execute("DELETE FROM timings WHERE library_id=?", (library_id,))
+                if keep_library:
+                    db.execute("INSERT OR REPLACE INTO preferences VALUES('active',?)", (library_id,))
+                else:
+                    db.execute("DELETE FROM libraries WHERE id=?", (library_id,))
+                active = db.execute("SELECT value FROM preferences WHERE key='active'").fetchone()
+                if not keep_library and active and active[0] == library_id:
+                    next_library = db.execute("SELECT id FROM libraries ORDER BY rowid LIMIT 1").fetchone()
+                    db.execute(
+                        "INSERT OR REPLACE INTO preferences VALUES('active',?)",
+                        (next_library[0] if next_library else None,),
+                    )
+                db.execute("INSERT OR REPLACE INTO preferences VALUES('libraries_initialized','1')")
+                self._reset_empty_queue(db)
+        thumbnails = self.directory / "thumbnails" / library_id
+        if Path(library_id).name == library_id and thumbnails.is_dir() and not thumbnails.is_symlink():
+            import shutil
+
+            try:
+                shutil.rmtree(thumbnails)
+            except OSError:
+                warnings.append("Some cached thumbnails could not be removed.")
+        if keep_library:
+            return {"library": self.library(library_id), "index_deleted": True, "warnings": warnings}
+        return {"removed": True, "index_deleted": True, "warnings": warnings}
+
+    def _save_folder_settings(self, library_id, folder, config, previous):
+        from .pipeline import writer_lock
+        from .signatures import stage_signatures
+
+        with self.connect() as db:
+            if db.execute(
+                "SELECT 1 FROM jobs WHERE library_id=? AND status IN ('starting','running','pausing')",
+                (library_id,),
+            ).fetchone():
+                raise LibraryBusyError(
+                    "Pause this library’s task and wait for checkpoints before changing indexing settings."
+                )
+        try:
+            with Store(folder, blocking=False) as store, writer_lock(store):
+                store.apply_config(asdict(config), stage_signatures(config))
+        except (BlockingIOError, RuntimeError) as exc:
+            raise LibraryBusyError(
+                "Index is in use. Pause indexing and close active MCP requests, then retry."
+            ) from exc
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO libraries VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",
+                (library_id, str(folder), json.dumps(asdict(config))),
+            )
+            if asdict(config) != asdict(parse_config(previous)):
+                # Keep old job snapshots immutable; an explicit settings edit supersedes
+                # waiting work. The UI enqueues a new task with the saved configuration.
+                db.execute(
+                    "UPDATE jobs SET status='cancelled',finished_at=? WHERE library_id=? "
+                    "AND status IN ('queued','paused','interrupted')",
+                    (time.time(), library_id),
+                )
+                self._reset_empty_queue(db)
 
     def save_config(self, library_id, raw):
         config = parse_config(raw)
-        self.library(library_id)
-        with self.connect() as db:
-            db.execute("UPDATE libraries SET config=? WHERE id=?", (json.dumps(asdict(config)), library_id))
+        with self.queue_guard():
+            library = self.library(library_id)
+            self._save_folder_settings(library_id, library["path"], config, library["config"])
         return asdict(config)
 
     def update_job(self, job_id, **values):
@@ -293,9 +410,9 @@ class AppState:
     def launch(self, library_id, kind="index"):
         if kind not in {"index", "refresh"}:
             raise ValueError("Invalid job kind")
-        library = self.library(library_id)
-        config = parse_config(library["config"])
         with self.queue_guard():
+            library = self.library(library_id)
+            config = parse_config(library["config"])
             self._recover_locked()
             with self.connect() as db:
                 row = db.execute(
@@ -389,6 +506,7 @@ class AppState:
             ).rowcount
             if not changed:
                 raise ValueError("Only waiting or paused tasks can be removed")
+            self._reset_empty_queue(db)
         return self.job(job_id)
 
     def move_job(self, job_id, direction):

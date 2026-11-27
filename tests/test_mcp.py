@@ -82,3 +82,16 @@ async def test_active_stdio_server_follows_persisted_folder_without_restart(tmp_
                 assert "library_id" in schema["properties"]
             invalid = await session.call_tool("library_context", {"library_id": "not-registered"})
             assert invalid.isError
+            registry.remove_library(first_library["id"])
+            listing = await session.call_tool("list_libraries", {})
+            payload = listing.structuredContent or json.loads(listing.content[0].text)
+            assert len(payload["libraries"]) == 1
+            assert payload["libraries"][0]["folder"] == str(second)
+            detached = await session.call_tool("library_overview", {"library_id": first_library["id"]})
+            assert detached.isError
+            assert not (first / ".video-library" / "library-v2.sqlite3").exists()
+            second_id = payload["libraries"][0]["library_id"]
+            registry.remove_library(second_id)
+            listing = await session.call_tool("list_libraries", {})
+            payload = listing.structuredContent or json.loads(listing.content[0].text)
+            assert payload["libraries"] == []

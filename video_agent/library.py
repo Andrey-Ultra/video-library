@@ -8,20 +8,14 @@ from collections import Counter
 import numpy as np
 
 from . import backends
-from .config import Config
+from .config import Config, parse_config
 from .signatures import embedding_namespace
 from .store import Store
 
 
 def indexed_config(store: Store) -> Config:
-    config = Config()
     raw = store.saved_config()
-    if raw:
-        for section, values in raw.items():
-            for key, value in values.items():
-                setattr(getattr(config, section), key, value)
-    config.validate()
-    return config
+    return parse_config(raw) if raw else Config()
 
 
 def card(item):
