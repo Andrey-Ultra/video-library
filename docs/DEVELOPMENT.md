@@ -1,6 +1,6 @@
-# Разработка
+# Development
 
-Рабочая платформа интерфейса — macOS 14+ на Apple Silicon. Установка окружения:
+The desktop interface targets macOS 14+ on Apple Silicon. Set up the environment:
 
 ```bash
 python3.12 -m venv .venv
@@ -9,50 +9,50 @@ pip install -e '.[mac,dev]'
 python scripts/check_project.py
 ```
 
-`check_project.py` запускает Ruff, весь Python-набор и на macOS нативные проверки
-состояния интерфейса/асинхронных ответов. `--playback` добавляет AVPlayer-проверки
-на сгенерированном коротком видео, `--build-desktop` собирает приложение, не открывая
-его. `--skip-system-ocr` явно исключает реальный системный OCR, если хост не может
-запустить Apple Vision. Приложение и очереди пользователя эти проверки не перезапускают.
-Проверки загрузчика используют маленькие искусственные файлы, не скачивают веса.
+`check_project.py` runs Ruff, the full Python test suite and, on macOS, native
+checks for interface state and asynchronous responses. `--playback` adds AVPlayer
+checks using a short generated video; `--build-desktop` builds the app without
+opening it. `--skip-system-ocr` explicitly excludes real system OCR on hosts that
+cannot run Apple Vision. These checks do not restart the user's app or queues.
+Downloader tests use small synthetic files and do not download model weights.
 
-## Где менять код
+## Code map
 
-| Область | Файлы |
+| Area | Files |
 |---|---|
-| Настройки и совместимость конфигов | `video_agent/config.py`, `signatures.py` |
-| Реестр папок, последовательная очередь, блокировки | `app_state.py`, `app_worker.py` |
-| SQLite, контрольные точки и выборочный сброс слоёв | `store.py`, `index_storage.py` |
-| Сканирование, перемещения и дубликаты | `sync.py`, `media.py` |
-| Индексация и построение дерева | `pipeline.py`, чистая валидация в `hierarchy.py` |
-| Ограниченный временный видеокэш | `proxy.py` |
-| Поиск и ответы по доказательствам | `library.py`, `answering.py` |
-| Каталог моделей и рекомендации для Mac | `model_catalog.py` |
-| Проверка локальных файлов моделей без загрузки весов | `model_cache.py` |
-| Фоновые загрузки и удаление моделей | `model_assets.py` |
-| HTTP-маршруты / снимок состояния интерфейса | `app.py` / `view_state.py` |
+| Settings and configuration compatibility | `video_agent/config.py`, `signatures.py` |
+| Folder registry, sequential queue and locks | `app_state.py`, `app_worker.py` |
+| SQLite, checkpoints and selective layer invalidation | `store.py`, `index_storage.py` |
+| Scanning, moves and duplicates | `sync.py`, `media.py` |
+| Indexing and tree construction | `pipeline.py`, pure validation in `hierarchy.py` |
+| Bounded temporary video cache | `proxy.py` |
+| Search and evidence-based answers | `library.py`, `answering.py` |
+| Model catalog and Mac recommendations | `model_catalog.py` |
+| Local model file checks without loading weights | `model_cache.py` |
+| Background downloads and model removal | `model_assets.py` |
+| HTTP routes / interface state snapshots | `app.py` / `view_state.py` |
 | MCP | `server.py` |
-| Нативные окна и состояние приложения | `desktop/Sources/Service.swift`, `DetailView.swift` |
-| Настройки, прокси, подключение MCP | `SettingsView.swift`, `AnalysisProxyPanel.swift`, `MCPView.swift` |
-| Защита от устаревших асинхронных ответов | `LatestRequest.swift` |
+| Native windows and application state | `desktop/Sources/Service.swift`, `DetailView.swift` |
+| Settings, proxies and MCP connection | `SettingsView.swift`, `AnalysisProxyPanel.swift`, `MCPView.swift` |
+| Protection against stale asynchronous responses | `LatestRequest.swift` |
 
-## Условия совместимости
+## Compatibility rules
 
-- Исходные видео не изменяются. Временные прокси и модели находятся отдельно от индекса.
-- API и MCP сохраняют текущие поля/идентификаторы. Внутренние переносы модулей
-  сохраняют старые точки импорта, используемые клиентами и тестами.
-- Сигнатура слоя меняется только при изменении способа получения доказательств;
-  обычный рефакторинг не должен сбрасывать готовую индексацию.
-- Изменение слоя сбрасывает только его и зависимые слои. Проверять это тестами,
-  особенно при изменениях речи, дерева и поисковых векторов.
-- Долгие операции не выполняются на главном потоке интерфейса. Ответы на чтение
-  применяются только к актуальной версии запроса; закрытие окна их инвалидирует.
-- Запись индекса требует writer-lock; чтение интерфейса/MCP идёт на одном SQLite
-  snapshot. Очередь и доступ к моделям используют отдельные согласованные блокировки.
-- Модельные ответы — недоверенные данные. Некорректная группировка не должна
-  терять или переставлять исходные фрагменты. Резервное дерево сохраняет отдельные
-  окна и помечается `single_window_fallback`; ошибки backend остаются ошибками.
+- Keep source videos unchanged. Temporary proxies and models are stored separately from the index.
+- Preserve existing API and MCP fields and identifiers. Internal module moves must
+  retain import paths used by clients and tests.
+- Change a layer's signature only when its evidence-generation method changes.
+  Routine refactoring must not invalidate completed indexing.
+- Changing a layer invalidates only that layer and its dependents. Cover this with
+  tests, especially when changing speech, trees or search vectors.
+- Keep long operations off the main UI thread. Apply read responses only to the
+  current request revision; closing the window invalidates pending responses.
+- Index writes require the writer lock. UI and MCP reads use a consistent SQLite
+  snapshot. The queue and model access use separate, coordinated locks.
+- Treat model responses as untrusted data. Invalid grouping must not lose or
+  reorder source observations. The fallback tree preserves individual windows and
+  is marked `single_window_fallback`; backend errors must still be reported as errors.
 
-При исправлении сбоя сначала воспроизведите его на временной библиотеке. Тесты
-не должны обращаться к папкам/индексам пользователя, требовать большого скачивания
-или поднимать тяжёлую модель. Для системного OCR и AVPlayer есть отдельные проверки.
+Reproduce bugs in a temporary library first. Tests must not access the user's
+folders or indexes, require large downloads, or load a heavy model. Separate
+checks cover system OCR and AVPlayer.

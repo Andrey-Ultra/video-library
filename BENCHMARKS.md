@@ -1,226 +1,230 @@
-# Проверка на Mac mini M4 / 16 ГБ
+# Validation on Mac mini M4 / 16 GB
 
-Дата: 25 ноября 2026. Python 3.12.13. Точные версии библиотек:
-`requirements-mac.lock.txt`. Модели заранее скачаны; сеть загрузки весов не входит
-в замер. GPU Metal и Apple Vision доступны из обычного сеанса macOS.
+Recorded on November 25, 2026. Python 3.12.13. Exact library versions are listed in
+`requirements-mac.lock.txt`. Models were downloaded in advance; downloading weights
+is not included in the measurements. Metal GPU and Apple Vision were available in
+a regular macOS session.
 
-| Профиль | Материал | Все этапы, wall time | Время обработки / длительность |
+| Profile | Material | All stages, wall time | Processing time / footage duration |
 |---|---|---:|---:|
-| `fast` / стандартный 2B | 60 с gameplay без аудио + 5,759 с английской тестовой речи на белом фоне | 52,49 с | 0,798 |
-| `quality`, 4B | Тот же 60-секундный gameplay без аудио | 75,12 с | 1,252 |
+| `fast` / default 2B | 60 s of gameplay without audio + 5.759 s of English test speech on a white background | 52.49 s | 0.798 |
+| `quality`, 4B | The same 60-second gameplay clip without audio | 75.12 s | 1.252 |
 
-Первый тест был полным повторным прогоном с `--force`, не продолжением или
-пропуском уже готовых этапов. Обработаны речь, OCR, визуальные окна, иерархия
-и эмбеддинги. В 4B-тесте у видео нет аудио, поэтому ASR не выполнялся.
-Профили нельзя напрямую сравнивать как одинаковые наборы, но визуальный исходник
-одинаковый. Для обоих: окна 10 с, шаг 8 с, 6 кадров/окно, длинная сторона 448 px,
-OCR 1 кадр/с, Qwen3-Embedding 0.6B 4-bit, группировка по 8 наблюдений.
+The first test was a complete rerun with `--force`, rather than a resume or a skip
+of completed stages. It processed speech, OCR, visual windows, hierarchy and
+embeddings. The 4B test video had no audio, so ASR did not run.
+The profiles cannot be compared as identical datasets, although the visual source
+was the same. Both used 10 s windows, an 8 s step, 6 frames per window, a 448 px
+long-side limit, OCR at 1 frame/s, Qwen3-Embedding 0.6B 4-bit, and groups of
+8 observations.
 
-Этапы быстрого профиля (секунды; округлены):
+Fast-profile stages (seconds, rounded):
 
-| Файл | Речь | OCR | Описания | Иерархия | Эмбеддинги |
+| File | Speech | OCR | Descriptions | Hierarchy | Embeddings |
 |---|---:|---:|---:|---:|---:|
-| Английский тест | 2,26 | 0,46 | 6,79 | 3,41 | 0,98 |
-| Gameplay | 0 | 5,65 | 28,49 | 3,68 | 0,50 |
+| English test | 2.26 | 0.46 | 6.79 | 3.41 | 0.98 |
+| Gameplay | 0 | 5.65 | 28.49 | 3.68 | 0.50 |
 
-Wall time дополнительно включает открытие файлов, создание backend-объектов,
-освобождение моделей и работу с индексом. Значения относятся к одному короткому
-набору на этом компьютере, а не к гарантированному throughput любого архива.
-При первом обращении Apple Vision наблюдалась дополнительная задержка около
-28 секунд; в приведённом полном замере системный OCR уже был прогрет.
+Wall time also includes opening files, creating backend objects, releasing models
+and accessing the index. These results describe one short dataset on this computer,
+not guaranteed throughput for every archive. The first Apple Vision request had
+an additional delay of about 28 seconds; system OCR was already warm in the full
+measurement above.
 
-Проверки результата:
+Result checks:
 
-- В английском тесте распознана заданная фраза про лису, птицу и камеру с таймкодами.
-- Визуальная сводка того же теста описывает белый фон, не выдаёт слова о животных
-  за животных в кадре.
-- Гибридный поиск возвращает реальные окна, события и сводку gameplay.
-- Локальная модель отвечает по-русски с ссылками на ID; CLI добавляет точные
-  временные диапазоны цитируемых узлов из базы, не полагаясь на генерацию таймкодов.
-- Повторная индексация готового набора заняла около 0,1 с и не создала дубликатов.
-- Проверено настоящее MCP stdio-подключение и чтение инструментов.
+- The English test recognized the supplied phrase about a fox, bird and camera, with timestamps.
+- The visual summary of that test described the white background instead of treating
+  spoken animal names as animals visible in the frame.
+- Hybrid search returned actual gameplay windows, events and a summary.
+- The local model answered in Russian with evidence IDs. The CLI added the cited
+  nodes' exact time ranges from the database rather than asking the model to generate timestamps.
+- Reindexing the completed dataset took about 0.1 s and created no duplicates.
+- A real MCP stdio connection and tool discovery were verified.
 
-Эти замеры выполнялись на временных копиях в `.cache/benchmark` и
-`.cache/benchmark-4b`; при уборке проекта временные копии удалены. Исходные видео
-не изменены. Постоянная папка для проверки на реальных исходниках теперь `videos/`;
-видео, индексы и веса моделей не входят в Git.
+These measurements used temporary copies in `.cache/benchmark` and
+`.cache/benchmark-4b`; the copies were removed during project cleanup. Source videos
+were unchanged. The permanent folder for validation against real sources became
+`videos/`; videos, indexes and model weights are excluded from Git.
 
-Этот замер не проверяет полноту обнаружения редких событий на 20 часах записи,
-качество распознавания видов животных или все варианты аудио/видеоконтейнеров.
-NVIDIA-профиль в этой среде не проверялся.
+This measurement does not establish rare-event recall over 20 hours of recording,
+animal-species recognition quality, or compatibility with every audio/video
+container variant. The NVIDIA profile was not tested in this environment.
 
-## Реальные исходники из `videos/`
+## Real sources from `videos/`
 
-Дополнительно полностью обработаны три файла пользователя, без перекодирования
-и без изменения исходников:
+Three additional user files were processed completely, without transcoding or
+modifying the originals:
 
-| Файл | Длительность | Окна | События | OCR-наблюдения | Фразы речи |
+| File | Duration | Windows | Events | OCR observations | Speech segments |
 |---|---:|---:|---:|---:|---:|
-| `clip_1min_2026-10-03_21-49-13.mp4` | 01:01,739 | 8 | 1 | 10 | 0 |
-| `new-england.mp4` | 38:54,859 | 292 | 111 | 155 | 150 |
-| `красивый ролик сна.mov` | 02:59,046 | 23 | 4 | 91 | 16 |
+| `clip_1min_2026-10-03_21-49-13.mp4` | 01:01.739 | 8 | 1 | 10 | 0 |
+| `new-england.mp4` | 38:54.859 | 292 | 111 | 155 | 150 |
+| `красивый ролик сна.mov` | 02:59.046 | 23 | 4 | 91 | 16 |
 
-Итого: **42:55,644 видео**, **323 окна**, **116 событий**, 16 узлов крупных эпизодов,
-3 корневые сводки и **880 эмбеддингов**. Все этапы имеют статус `complete`.
-Аудит проверил покрытие окон, временные границы, достижимость всех наблюдений из
-дерева, совместимость/норму векторов и отсутствие изменения исходников.
+Total: **42:55.644 of video**, **323 windows**, **116 events**, 16 larger episode
+nodes, 3 root summaries and **880 embeddings**. Every stage had status `complete`.
+The audit checked window coverage, time bounds, reachability of every observation
+through the tree, vector compatibility/norms, and unchanged source files.
 
-Суммарное активное время трёх запусков индексатора, включая неудачные OCR-проходы
-и восстановление: **2256,32 с = 37:36,32**, отношение к длительности **0,876**.
-Это сумма времени самих процессов индексации, без пауз на разработку между
-запусками. Последний проход использовал checkpoints, поэтому его отдельные
-254,18 с нельзя выдавать за время первичной индексации всего архива.
+Total active time across three indexer runs, including failed OCR passes and
+recovery: **2256.32 s = 37:36.32**, a processing-to-duration ratio of **0.876**.
+This is the sum of the indexer processes' running times, excluding development
+pauses between runs. The last pass resumed from checkpoints, so its individual
+254.18 s must not be presented as the initial indexing time of the entire archive.
 
-Скорость существенно зависит от исходника: минутный 4K/60 fps файл потребовал
-около 217 с суммарно по этапам; его чтение/декодирование заметно медленнее,
-чем в предыдущем тесте с уменьшенной копией. Цель 1:1 достигнута в среднем по
-этому набору, но не для каждого отдельного формата.
+Speed depended substantially on the source: a one-minute 4K/60 fps file required
+about 217 s across its stages. Reading/decoding it was noticeably slower than in
+the earlier test with a smaller copy. The 1:1 target was reached on average for
+this dataset, not for every individual format.
 
-Контрольные поисковые запросы сверены с исходными кадрами:
+Reference searches were checked against source frames:
 
-- Раскалывание бревна оранжевым инструментом: `new-england.mp4`, **04:56–05:06**.
-- Мойка синей лодки: тот же файл, **19:28–19:38**.
-- Поездка на мотоцикле ночью: `.mov`, в том числе **00:00–00:10**.
-- Реплика `You ever miss the army?`: `.mov`, **01:28,800–01:30,640**.
-- Английский титр `PREPARING FOR THE COLD`: `new-england.mp4`, около **00:19**;
-  OCR найденный текст сопоставлен с кадром.
+- Splitting a log with an orange tool: `new-england.mp4`, **04:56–05:06**.
+- Washing a blue boat: the same file, **19:28–19:38**.
+- Riding a motorcycle at night: the `.mov` file, including **00:00–00:10**.
+- The line `You ever miss the army?`: `.mov`, **01:28.800–01:30.640**.
+- The English title `PREPARING FOR THE COLD`: `new-england.mp4`, around **00:19**;
+  the OCR result was compared with the frame.
 
-Проверено реальное MCP-подключение: обзор трёх файлов, раскрытие дерева и
-получение кадра на 19:30. Повторный запуск готовой папки занял около 0,13 с
-и не создал дубликатов.
+A real MCP connection was checked: an overview of the three files, expanding the
+tree, and retrieving a frame at 19:30. Rerunning the completed folder took about
+0.13 s and created no duplicates.
 
-Найденные и исправленные проблемы: накопление неисправного нативного состояния
-Apple Vision (OCR теперь изолирован и обновляет процесс после 400 кадров),
-разные Unicode-представления русских имён файлов на macOS, вытеснение речи и
-визуальных наблюдений повторяющимися OCR-результатами в контексте ответа.
+Issues found and fixed: accumulated broken native Apple Vision state (OCR was
+isolated in a process that is recycled after 400 frames), different Unicode
+representations of Russian filenames on macOS, and repeated OCR results crowding
+speech and visual observations out of the answer context.
 
-Описания 2B остаются приблизительными: в окне с несколькими планами модель может
-описать только часть происходящего или неточно назвать предмет. Пять контрольных
-запросов подтверждают конкретные находки, но не дают общей оценки полноты или
-точности на всём архиве. Таймкоды и исходные кадры остаются обязательной опорой.
+The 2B descriptions remain approximate: for a window containing several shots,
+the model may describe only part of what happens or misidentify an object. Five
+reference queries confirm specific findings, not overall recall or accuracy across
+the archive. Timestamps and source frames remain essential evidence.
 
-Подробные локальные результаты: `.cache/real-validation/index-check.json`,
-`search-checks.json` и `run.json`. Эти артефакты и сами видео исключены из Git.
+Detailed local results: `.cache/real-validation/index-check.json`,
+`search-checks.json` and `run.json`. These artifacts and the videos are excluded
+from Git.
 
-Для свободных ответов по длинному контексту визуальная Qwen3-VL-4B оказалась
-ненадёжной: наблюдались повторы, смена языка и противоречивые формулировки.
-Поэтому ответы переведены на отдельную текстовую **Qwen3-4B-Instruct-2507 4-bit**
-через MLX-LM. Это не изменяет и не пересчитывает видеоиндекс.
+For free-form answers over long contexts, the visual Qwen3-VL-4B model proved
+unreliable: repeated text, language switches and contradictory wording were
+observed. Answering was therefore moved to a separate text model,
+**Qwen3-4B-Instruct-2507 4-bit**, through MLX-LM. This does not change or recompute
+the video index.
 
-В финальной проверке ответ на вопрос о мойке лодки сослался на **19:28–19:38**;
-вопрос по `.mov` с обычным русским написанием имени файла выбрал правильный файл,
-отделил изображение, английскую речь и надписи на экране. Проверяются допустимые
-ID источников; временные диапазоны добавляются из базы. Отдельные правила
-отклоняют зацикленные ответы и некоторые бездоказательные утверждения об
-отсутствии событий во всём видео. Это проверки конкретных сбоев, а не гарантия
-фактической правильности всех формулировок небольшой локальной модели.
+In the final check, the answer about washing the boat cited **19:28–19:38**. A
+question about the `.mov` file using its usual Russian filename selected the
+correct file and distinguished visual content, English speech and on-screen text.
+Allowed source IDs are validated; time ranges come from the database. Separate
+rules reject repetitive answers and some unsupported claims that events are
+absent from an entire video. These checks address specific failures; they do not
+guarantee that every statement from a small local model is factually correct.
 
-Итоговые проверки: **41 автоматический тест**, пять контрольных поисковых
-запросов, два вопроса на русском и реальное MCP-подключение. Текст ответов сохранён
-в `.cache/real-validation/answer-kayak.txt` и `answer-game.txt`.
+Final validation: **41 automated tests**, five reference searches, two questions
+in Russian and a real MCP connection. Answer text was saved in
+`.cache/real-validation/answer-kayak.txt` and `answer-game.txt`.
 
-## Проверка приложения и синхронизации — 2026-11-25
+## App and synchronization validation — 2026-11-25
 
-Обновление исходной папки из интерфейса сохранило 3 ID видео, все 15 завершённых
-этапов и 880 наблюдений: новых/изменённых/удалённых файлов не было, модели
-повторно не запускались. Аудит исходной базы и источников прошёл после миграции.
+Refreshing the source folder through the UI preserved 3 video IDs, all 15 completed
+stages and 880 observations: no files were added, changed or removed, and models
+did not run again. The source database and files passed the audit after migration.
 
-Из `new-england.mp4` создана отдельная тестовая копия 19:28–19:46, 640×360,
-12 fps, 18 секунд с аудио. Запуск всех модулей кнопкой UI завершился за **73,17 с**:
-речь 2,39 с; OCR 56,72 с; визуальные окна 9,48 с; дерево 3,51 с;
-эмбеддинги 0,85 с. Получены 2 окна, 2 события, 1 сводка, 1 речевой фрагмент,
-0 непустых OCR-наблюдений и 6 векторов. Описание первого окна содержит мойку
-синего каяка. Apple Vision потребовал автоматического перезапуска с повтором
-того же кадра. Такой короткий прогон показывает стоимость холодного старта;
-он не подтверждает скорость 1:1. Исходные ролики не менялись.
+A separate 19:28–19:46 test copy was made from `new-england.mp4`: 640×360,
+12 fps, 18 seconds with audio. Running all modules through the UI finished in
+**73.17 s**: speech 2.39 s; OCR 56.72 s; visual windows 9.48 s; tree 3.51 s;
+embeddings 0.85 s. It produced 2 windows, 2 events, 1 summary, 1 speech segment,
+0 nonempty OCR observations and 6 vectors. The first window's description included
+washing a blue kayak. Apple Vision needed an automatic restart and a retry of the
+same frame. This short run demonstrates cold-start overhead; it does not establish
+1:1 processing speed. Original videos were unchanged.
 
-Отдельные интеграционные тесты проверяют остановку настоящего worker-процесса
-после сохранённого окна, восстановление после SIGKILL, Pause/Resume, сохранение
-настроек и активной папки, полноценное stdio-подключение с переключением папки
-без перезапуска MCP, переименование и смену имён местами, дубликаты, удаление
-последней копии, коллизию быстрого хеша, миграцию и отказ чтения папки.
-Модели в тестах аварий детерминированы; нативный прогон выше использует реальные
-MLX/Parakeet/Apple Vision. Параметры с целочисленным значением (`10.0` → `10`
-при JSON-сериализации браузером) нормализуются, чтобы сохранение формы не
-перестраивало неизменённые этапы.
+Separate integration tests cover stopping a real worker process after a saved
+window, recovery after SIGKILL, Pause/Resume, persistence of settings and the
+active folder, a full stdio connection with folder switching without restarting
+MCP, renaming and swapping filenames, duplicates, deletion of the last copy, a
+sampled-hash collision, migration, and a directory read failure. Failure tests use
+deterministic model substitutes; the native run above used real
+MLX/Parakeet/Apple Vision. Integer-valued parameters (`10.0` → `10` when serialized
+by the browser as JSON) are normalized so saving the form does not rebuild
+unchanged stages.
 
-Артефакты: `.cache/ui-validation/app-run.json`, `original-index-check.json`,
-`fixture-index-check.json`; тестовая копия и её индекс находятся отдельно от
-пользовательской папки `videos`.
+Artifacts: `.cache/ui-validation/app-run.json`, `original-index-check.json`,
+`fixture-index-check.json`; the test copy and its index are separate from the
+user's `videos` folder.
 
-Финальная проверка приложения: **57 тестов прошли за 31,80 с**; Ruff,
-форматирование Python, синтаксис JavaScript и launcher, `git diff --check`
-прошли. Интерфейс проверен в компактной панели браузера: выбор папки, сохранение
-0,5 fps и восстановление после перезапуска, возврат к основной библиотеке,
-обновление без повторного запуска моделей и копирование команды MCP в clipboard.
-Повторное обновление готового архива из UI заняло **0,02 с**; это тёплый пропуск
-готовых этапов, а не скорость новой индексации. Перед завершением активна только
-пользовательская библиотека `videos`, все 3 видео и 880 наблюдений сохранены.
+Final app validation: **57 tests passed in 31.80 s**; Ruff, Python formatting,
+JavaScript and launcher syntax, and `git diff --check` passed. The UI was checked
+in a compact browser panel: choosing a folder, saving 0.5 fps and restoring it
+after restart, returning to the main library, refreshing without running models
+again, and copying the MCP command to the clipboard. Another refresh of the
+completed archive through the UI took **0.02 s**; this was a warm skip of completed
+stages, not the speed of new indexing. At the end, only the user's `videos`
+library was active, with all 3 videos and 880 observations preserved.
 
-## Нативный macOS-клиент — 2026-11-25
+## Native macOS client — 2026-11-25
 
-Браузерный frontend заменён SwiftUI/AppKit-приложением `Video Library.app`.
-Компиляция под Apple Silicon и локальная подпись проверены. Используется
-настоящий `AVPlayerView` с явным линкованием AVKit; при проверке устранён
-runtime-сбой SwiftUI VideoPlayer из-за отсутствующей ObjC superclass metadata.
-Клиент запускает внутренний API на случайном loopback-порту и завершает его
-при выходе. Тяжёлая индексация остаётся отдельным процессом.
+The browser frontend was replaced with the SwiftUI/AppKit application
+`Video Library.app`. Compilation for Apple Silicon and local signing were
+verified. It uses a real `AVPlayerView` with explicit AVKit linkage; validation
+resolved a SwiftUI VideoPlayer runtime failure caused by missing ObjC superclass
+metadata. The client starts its internal API on a random loopback port and stops
+it on exit. Heavy indexing remains a separate process.
 
-**58 Python-тестов прошли за 32,16 с**. Новый интеграционный тест проверяет,
-что подробности, дерево, поиск и исходные OCR payload не выходят за выбранные
-library ID и video ID даже после смены активной папки. Запрос чужого item ID
-отклоняется; неполные слои не выдаются как опубликованные наблюдения.
+**58 Python tests passed in 32.16 s**. A new integration test checks that details,
+trees, search and original OCR payloads stay within the selected library ID and
+video ID even after the active folder changes. Requests for another video's item
+ID are rejected; incomplete layers are not returned as published observations.
 
-На реальном `красивый ролик сна.mov` подробный API подтвердил 23 визуальных
-окна, 4 события, 16 речевых фрагментов, 91 OCR-наблюдение и 1 сводку; все этапы
-complete, исходник доступен для воспроизведения. Три исходных ролика и 880
-наблюдений сохранены без переиндексации. Отчёт —
+For the real `красивый ролик сна.mov`, the detailed API confirmed 23 visual
+windows, 4 events, 16 speech segments, 91 OCR observations and 1 summary. All
+stages were complete and the source was available for playback. The three
+original videos and 880 observations were preserved without reindexing. Report:
 `.cache/native-validation/real-clip-details.json`.
 
-Первый Finder-запуск локально подписанного .app запрашивает системный доступ
-к Documents. При переподписи после пересборки macOS проверяет новый code hash
-и может запросить разрешение повторно. Ожидающий TCC-запрос задерживает чтение
-Python `pyvenv.cfg`; приложение показывает экран загрузки до разрешения.
+The first Finder launch of the locally signed .app requests system access to
+Documents. When the app is signed again after a rebuild, macOS checks the new code
+hash and may request permission again. A pending TCC prompt delays reading Python's
+`pyvenv.cfg`; the app shows its loading screen until access is granted.
 
-## Пользовательский плеер и Play selection — 2026-11-25
+## Custom player and Play selection — 2026-11-25
 
-AVKit отображает только изображение; управление, громкость, таймлайн и розовое
-выделение наблюдения реализованы в SwiftUI. Для OCR используется маркер кадра,
-а не искусственный длинный интервал. Отдельная Play selection делает точный seek
-к началу выбранного наблюдения и запускает видео только после его завершения.
-Устаревшие completion callbacks отменённых перемоток не могут запустить старый
-фрагмент. Выделение не устанавливает playback boundary или loop. Решения о
-воспроизведении принадлежат ClipPlayback; пересоздание NSView не останавливает
-источник скрытым побочным эффектом.
+AVKit displays only the video image; controls, volume, timeline and the pink
+observation highlight are implemented in SwiftUI. OCR uses a frame marker rather
+than an artificial long interval. A separate Play selection action seeks exactly
+to the selected observation's start and starts playback only when seeking has
+finished. Stale completion callbacks from cancelled seeks cannot start an old
+selection. The selection sets neither a playback boundary nor a loop. ClipPlayback
+owns playback decisions; recreating the NSView does not silently stop the source.
 
-**7 проверок настоящего AVPlayer прошли**: Play до готовности item; перемотка
-за пределы выделения и обычный Play с новой позиции; повторный запуск выбора
-с его начала; продолжение после конца выделения; быстрая смена выбора без
-позднего autoplay; OCR-кадр без остановки через 1 мс; Pause во время seek и
-освобождение источника при закрытии. Все прогоны без звука. Воспроизводимая
-команда: `.venv/bin/python scripts/check_playback.py`; она создаёт 12-секундное
-тестовое видео и компилирует `desktop/Tests/PlaybackChecks.swift`.
+**7 real AVPlayer checks passed**: Play before the item is ready; seeking beyond
+the selection and ordinary Play from the new position; restarting the selection
+from its beginning; continuing beyond the selection's end; rapidly changing the
+selection without late autoplay; an OCR frame without a stop after 1 ms; Pause
+during seek and releasing the source on close. All runs were muted. Reproducible
+command: `.venv/bin/python scripts/check_playback.py`; it generates a 12-second
+test video and compiles `desktop/Tests/PlaybackChecks.swift`.
 
-Нативное окно проверено на реальном `красивый ролик сна.mov`: выбрано окно
-00:16–00:26, воспроизведение продолжилось за его пределы (наблюдалось 01:05),
-после перемотки к 00:37 кнопка Play selection вернула источник к 00:16 и
-запустила его. Проверены Pause и изменение позиции через доступный таймлайн.
-Обновлённый .app собран, подпись проверена. Снимок итогового интерфейса:
-`.cache/native-validation/custom-player.png`. Индекс и исходные файлы не менялись.
+The native window was checked with the real `красивый ролик сна.mov`: the
+00:16–00:26 window was selected and playback continued beyond it (01:05 was
+observed). After seeking to 00:37, Play selection returned the source to 00:16
+and started it. Pause and position changes through the accessible timeline were
+also checked. The updated .app was built and its signature verified. Screenshot
+of the resulting interface: `.cache/native-validation/custom-player.png`.
+The index and source files were unchanged.
 
-## Фоновый режим и строка меню — 2026-11-25
+## Background mode and menu bar — 2026-11-25
 
-Добавлены NSStatusItem VL, Hide to Menu Bar (⇧⌘M), возврат окна, статус
-индексации и Pause/Resume в меню. После скрытия используется accessory policy:
-окна и значок Dock скрываются, статусный значок остаётся. Закрытие последнего
-окна больше не завершает приложение. Явный Quit завершает UI и его локальный
-сервис. Видеопредпросмотры ставятся на паузу при скрытии; отдельный worker
-индексации не получает команду остановки.
+Added an NSStatusItem VL, Hide to Menu Bar (⇧⌘M), window restoration, indexing
+status and Pause/Resume in the menu. Hiding switches to the accessory activation
+policy: windows and the Dock icon are hidden while the status icon remains.
+Closing the last window no longer quits the app. Explicit Quit ends the UI and
+its local service. Video previews pause when hidden; the separate indexing
+worker is not told to stop.
 
-Сборка macOS 14+/Apple Silicon и подпись проверены. Нативная проверка:
-Hide to Menu Bar → повторное открытие .app → закрытие последнего окна →
-повторное открытие → явный ⌘Q. После скрытия и закрытия окна процессы приложения
-и сервиса сохраняли те же PID; localhost API продолжал возвращать 3 видео и
-880 наблюдений. После Quit оба процесса завершились; приложение открыто снова.
-Возврат проверялся через повторное открытие .app, вызывающее тот же showLibrary,
-что и пункт статусного меню. Отчёт: `.cache/native-validation/menu-bar-check.json`.
+The macOS 14+/Apple Silicon build and signature were verified. Native check:
+Hide to Menu Bar → reopen .app → close the last window → reopen → explicit ⌘Q.
+After hiding and closing the window, the app and service retained their PIDs;
+the localhost API continued to return 3 videos and 880 observations. After Quit,
+both processes ended, and the app was opened again. Restoration was checked by
+reopening the .app, which calls the same showLibrary action as the status-menu
+item. Report: `.cache/native-validation/menu-bar-check.json`.

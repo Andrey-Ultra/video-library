@@ -1,44 +1,52 @@
 <p align="center">
-  <img src="docs/brand/vl.svg" width="88" height="88" alt="Vl">
+  <img src="docs/brand/vl.svg" width="88" height="88" alt="Video library logo">
 </p>
 
 <h1 align="center">Video library</h1>
 
-<p align="center">A local video library your AI agent can explore.</p>
-<p align="center"><b>Early alpha · macOS · Python + SwiftUI · MCP</b></p>
+<p align="center"><b>Find moments in your footage. Let your AI agent explore them.</b></p>
+<p align="center">Early alpha · Apple Silicon · Python + SwiftUI · MCP</p>
 
-Video library indexes video folders: it transcribes speech, reads on-screen text,
-describes what happens, and saves the results with timestamps.
-Through MCP, your agent can find relevant moments and explore your footage.
-Source videos stay unchanged.
+Video library turns video folders into a searchable local index of scenes, speech
+and on-screen text, with timestamps back to the original footage. Browse it in
+the native Mac app or connect an AI agent through MCP. Your source videos stay unchanged.
 
-## What works
+<p align="center">
+  <img src="docs/images/library-queue.png" width="100%" alt="Video library showing indexed clips and the folder processing queue">
+</p>
+<p align="center"><sub>Library queue from an earlier development build. The interface is evolving.</sub></p>
 
-- Visual descriptions, speech transcription, and OCR.
-- Event trees, summaries, keyword search, and semantic search.
-- A native app for browsing libraries, playing clips, and inspecting indexed evidence.
-- A folder queue with pause and resume from saved checkpoints.
-- Optional temporary 1080p/720p analysis proxies with an FPS cap.
-- MCP tools for choosing libraries, finding clips, and checking source frames.
+<details>
+<summary>Clip inspection and playback</summary>
 
-## Project status
+<p align="center">
+  <img src="docs/images/clip-details.png" width="100%" alt="Clip inspection with timestamped visual descriptions, video playback and a selected time range">
+</p>
+<p align="center"><sub>Inspect saved observations and jump to the source footage. Development screenshot.</sub></p>
 
-A working prototype in active development, tested on a **Mac mini M4 / 16 GB**.
-Speech supports automatic recognition of 25 European languages, including English, Russian,
-Ukrainian, Spanish, French, and German, with Parakeet v3. On-screen text and visual descriptions
-still focus on English. Existing libraries keep their saved speech model; select v3 in the folder’s Indexing settings
-to enable multilingual speech, then add the library to the queue to rebuild speech and search.
+</details>
 
-The desktop app targets **Macs with Apple Silicon**. Folder settings offer local model downloads,
-a visual API server option, and suggestions based on the Mac’s chip and memory.
-Models are not bundled. Experimental NVIDIA configuration remains available through the CLI.
-Setup requires the source code; there is no standalone installer yet.
-Models can make mistakes, and sparse frame sampling can miss brief events.
-Video editing and export are outside the current scope.
+## What it does
 
-## Run on Mac
+- Describes scenes, transcribes speech and recognizes on-screen text.
+- Builds event trees and summaries; searches by exact words or meaning.
+- Queues multiple folders, saves checkpoints and resumes unfinished work.
+- Downloads and manages local models, with settings suggested for your Mac.
+- Lets MCP agents choose a library, search observations and inspect source frames.
 
-Requires **macOS 14+, Apple Silicon, Python 3.12, FFmpeg, and Command Line Tools**.
+Local models process footage on your Mac. An optional visual API connection sends
+sampled frames to the server you choose.
+
+## Status
+
+A working prototype in active development, tested on **Mac mini M4 / 16 GB**.
+Installation is from source; there is no standalone installer yet.
+AI observations can be inaccurate, and frame sampling can miss brief events.
+
+## Get started
+
+Requires **macOS 14+, Apple Silicon, Python 3.12, FFmpeg and Command Line Tools**.
+From the project folder:
 
 ```bash
 python3.12 -m venv .venv
@@ -47,19 +55,12 @@ pip install -e '.[mac]'
 python main.py ui
 ```
 
-Models are not bundled. In the app: **Add folder → choose models → Download → Start indexing**.
-Downloads show progress, verification and retryable errors. **Suggest for this Mac** offers a starting point based on its chip and memory.
-Folders with a saved index restore their settings; missing local models are offered for download before resuming.
-To change methods later, right-click the folder → **Indexing settings…**. For MCP setup: **Connect your agent**.
+**Add folder → choose models → Download → Start indexing.** Models are not bundled.
+To connect an agent, open **Connect your agent** in the app.
 
-[Setup, CLI & MCP — Russian](docs/USAGE.md) · [Development — Russian](docs/DEVELOPMENT.md) · [Benchmarks — Russian](BENCHMARKS.md)
+[Usage & MCP (Russian)](docs/USAGE.md) · [Development](docs/DEVELOPMENT.md) · [Historical validation report](BENCHMARKS.md)
 
-## Built with Codex
+## Credits & license
 
-Developed with **OpenAI Codex**.
-The author's rough estimate: **30% human, 70% Codex**.
-This describes participation in development, not a measured share of code lines.
-
-## License
-
-[MIT](LICENSE) © 2026. See the license file for the copyright holder and full terms.
+Built with **OpenAI Codex**. The author's rough estimate: **30% human, 70% Codex**.
+Released under the [MIT License](LICENSE).
