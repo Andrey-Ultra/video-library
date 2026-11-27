@@ -6,18 +6,19 @@ import json
 import re
 import unicodedata
 from collections import Counter
+from functools import cache
 from pathlib import Path
 
 from . import backends, prompts
 from .config import Config
-from .library import card, object_inventory, overview, search
+from .library import card, object_inventory, overview, query_embedding, search
 from .store import Store
 
 
 def validate_response(data, candidates):
     if not isinstance(data.get("answer"), str) or not isinstance(data.get("evidence_ids"), list):
         raise ValueError("Answer model returned an invalid structured response")
-    if any(i not in candidates for i in data["evidence_ids"]):
+    if any(not isinstance(i, str) or i not in candidates for i in data["evidence_ids"]):
         raise ValueError("Answer model cited evidence that was not supplied")
     # A sampled index cannot justify universal claims that an entire video lacks
     # something. Models sometimes append such a claim after quoting positive evidence.
@@ -50,13 +51,31 @@ def answer(
         ]
         if len(mentioned) == 1:
             video_id = mentioned[0]
-    results = search(store, config, question, top_k=6, video_id=video_id, lexical_only=lexical_only)
+    # Mixed retrieval and per-layer quotas use the same normalized query. Keep
+    # only its small vector for this request, never a loaded model across calls.
+    vector = cache(lambda: query_embedding(config, question, backends.embedder))
+    results = search(
+        store,
+        config,
+        question,
+        top_k=6,
+        video_id=video_id,
+        lexical_only=lexical_only,
+        query_vector_factory=vector,
+    )
     # One channel (e.g. repeated subtitles) must not crowd speech and visuals out
     # of a mixed question. Keep a small evidence quota for each completed layer.
     seen = {hit["id"] for hit in results["hits"]}
     for source in ("speech", "visual", "ocr"):
         layer = search(
-            store, config, question, top_k=2, video_id=video_id, source=source, lexical_only=lexical_only
+            store,
+            config,
+            question,
+            top_k=2,
+            video_id=video_id,
+            source=source,
+            lexical_only=lexical_only,
+            query_vector_factory=vector,
         )
         for hit in layer["hits"]:
             if hit["id"] not in seen:

@@ -12,6 +12,7 @@ from pathlib import Path
 from . import backends, media, prompts
 from .backends.common import ModelSetupError
 from .config import Config
+from .hierarchy import single_window_groups, validated_groups
 from .proxy import ProxyCache
 from .signatures import embedding_namespace, stage_signatures
 from .store import STAGES, Store
@@ -321,10 +322,13 @@ class Indexer:
                     a_ms, b_ms = max(0, round(a * 1000)), min(round(b * 1000), round(duration_s * 1000))
                     if b_ms <= a_ms:
                         continue
-                    words = [
-                        {**w, "start_s": w["start_s"] + start, "end_s": w["end_s"] + start}
-                        for w in span.get("words", [])
-                    ]
+                    words = []
+                    for word in span.get("words", []):
+                        word_start = float(word["start_s"]) + start
+                        word_end = float(word["end_s"]) + start
+                        if not all(math.isfinite(t) for t in (word_start, word_end)):
+                            raise ValueError("ASR returned non-finite word timestamps")
+                        words.append({**word, "start_s": word_start, "end_s": word_end})
                     self.store.put_item(
                         item(
                             video["id"],
@@ -416,7 +420,11 @@ class Indexer:
                     children[0]["start_ms"],
                     children[-1]["end_ms"],
                     group.get("description"),
-                    {"level": 1, "grouping": "model_proposed", "timing_precision": "window_bounds"},
+                    {
+                        "level": 1,
+                        "grouping": group.get("grouping", "model_proposed"),
+                        "timing_precision": "window_bounds",
+                    },
                 )
                 nodes.append(node)
                 events.append(node)
@@ -456,31 +464,20 @@ class Indexer:
         expected = [node["id"] for node in batch]
         prompt = prompts.GROUP + json.dumps(evidence)
         for attempt in range(2):
+            self._check()
+            # Backend/runtime failures must remain visible. Only invalid model
+            # responses get a retry and the conservative partition fallback.
+            response = backend.generate(
+                prompt,
+                max_tokens=max(768, len(batch) * 140) * (attempt + 1),
+                schema=prompts.group_schema(expected),
+            )
             try:
-                data = backends.json_object(
-                    backend.generate(
-                        prompt,
-                        max_tokens=max(768, len(batch) * 140) * (attempt + 1),
-                        schema=prompts.group_schema(expected),
-                    )
-                )
-                groups = data.get("groups")
-                if not isinstance(groups, list) or not groups:
-                    raise ValueError("Hierarchy model returned no event groups")
-                flattened = [child for group in groups for child in group.get("children", [])]
-                if flattened != expected:
-                    raise ValueError("Hierarchy must preserve all observation IDs exactly once and in order")
-                if any(
-                    not group.get("children")
-                    or not isinstance(group.get("description"), str)
-                    or not group["description"].strip()
-                    for group in groups
-                ):
-                    raise ValueError("Every event group needs children and a description")
-                return groups
+                return validated_groups(backends.json_object(response), expected)
             except ValueError as exc:
                 if attempt:
-                    raise
+                    logger.warning("Event grouping invalid twice; preserving individual windows: %s", exc)
+                    return single_window_groups(batch)
                 logger.warning("Retrying event grouping: %s", exc)
                 prompt += (
                     "\nYour previous response was invalid. Include these IDs exactly once, in this order: "

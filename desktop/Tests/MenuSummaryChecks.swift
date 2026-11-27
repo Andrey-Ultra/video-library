@@ -41,6 +41,21 @@ import Foundation
     precondition(suggested["proxy"] == original["proxy"] && suggested["runtime"] == original["runtime"])
     precondition(suggested["answer"] == original["answer"] && suggested["visual"]["model"].string == "suggested")
     precondition(resources.hardware.description == "Apple M4 · 16 GB memory")
+    let catalog = try JSONDecoder().decode(ModelResources.self, from: Data("""
+      {"hardware":{"supported":true,"chip":"Apple M4","memory_gb":16,"cpu_cores":10},
+       "models":[{"id":"new/model-from-api","section":"visual","name":"New model","detail":"","status":"ready"}],
+       "required":[],"recommended":{}}
+      """.utf8))
+    var draft: JSONValue = .object(["visual": .object(["backend": .string("mlx"), "model": .string("new/model-from-api")]),
+      "speech": .object(["backend": .string("none")]), "embedding": .object(["backend": .string("none")])])
+    precondition(catalog.customModelSections(in: draft).isEmpty, "New server catalog models need no Swift catalog edit")
+    draft["visual"]["model"] = .string("/custom/local/model")
+    precondition(catalog.customModelSections(in: draft) == ["visual"])
+    precondition(catalog.customModelSections(in: draft).subtracting(["visual"]).isEmpty,
+      "A delayed catalog must preserve an explicit processing choice")
+    draft["visual"]["model"] = .string("new/model-from-api")
+    draft["visual"]["backend"] = .string("openai")
+    precondition(catalog.customModelSections(in: draft) == ["visual"], "A managed ID on an API backend is still custom")
     let loading = FolderMenuSummary(nil)
     precondition(loading.status == "Opening library…" && loading.workPercent == nil)
     let empty = FolderMenuSummary(try snapshot())

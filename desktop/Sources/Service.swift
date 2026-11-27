@@ -14,6 +14,7 @@ import SwiftUI
   var hideToMenuBar: () -> Void = {}
   private var service: Process?
   private var monitor: Task<Void, Never>?
+  private var latestReload = LatestRequest()
   private var errorLog: FileHandle?
   private var clipWindows: [ClipRoute: ClipWindowController] = [:]
   private var reportedJobFailures = Set<String>()
@@ -94,6 +95,7 @@ import SwiftUI
   }
   func stop() {
     monitor?.cancel()
+    latestReload.invalidate()
     if let process = service, process.isRunning { process.terminate() }
     service = nil
     try? errorLog?.close()
@@ -119,7 +121,7 @@ import SwiftUI
     let controller = ClipWindowController(window: window)
     controller.pausePlayback = { [weak clipModel] in clipModel?.playback.pause() }
     controller.onClose = { [weak self] in
-      clipModel.playback.close()
+      clipModel.close()
       self?.clipWindows.removeValue(forKey: route)
     }
     clipWindows[route] = controller
@@ -167,7 +169,9 @@ import SwiftUI
     return try JSONDecoder().decode(T.self, from: data)
   }
   func reload() async throws {
+    let revision = latestReload.begin()
     let value: Snapshot = try await request("api/state")
+    guard latestReload.accepts(revision), !Task.isCancelled else { return }
     if state != value { state = value }
     if error == nil, let job = value.job, job.status == "failed",
       let detail = job.error, !detail.isEmpty, !reportedJobFailures.contains(job.id)

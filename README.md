@@ -52,7 +52,7 @@ Downloads show progress, verification and retryable errors. **Suggest for this M
 Folders with a saved index restore their settings; missing local models are offered for download before resuming.
 To change methods later, right-click the folder → **Indexing settings…**. For MCP setup: **Connect your agent**.
 
-[Setup, CLI & MCP — Russian](docs/USAGE.md) · [Benchmarks — Russian](BENCHMARKS.md)
+[Setup, CLI & MCP — Russian](docs/USAGE.md) · [Development — Russian](docs/DEVELOPMENT.md) · [Benchmarks — Russian](BENCHMARKS.md)
 
 ## Built with Codex
 

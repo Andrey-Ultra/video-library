@@ -13,11 +13,16 @@ import SwiftUI
   let playback = ClipPlayback()
   var player: AVPlayer? { playback.player }
   private var requestID = UUID()
+  private var loads = LatestRequest()
+  private var listing: ListingQuery?
+  private struct ListingQuery: Equatable { let kind: String; let query: String }
   init(route: ClipRoute) { self.route = route }
   var prefix: String { "api/libraries/\(route.libraryID)/videos/\(route.videoID)" }
   func load(_ app: LibraryModel) async {
+    let revision = loads.begin()
     do {
       let value: Video = try await app.request(prefix)
+      guard loads.accepts(revision), !Task.isCancelled else { return }
       video = value
       if value.source_available == true {
         playback.open(
@@ -28,27 +33,44 @@ import SwiftUI
       }
       let page: ObservationPage = try await app.query(
         prefix + "/observations", parameters: ["kind": "summary", "limit": "100"])
+      guard loads.accepts(revision), !Task.isCancelled else { return }
       roots = page.items
-    } catch { self.error = error.localizedDescription }
+    } catch is CancellationError {
+      // Closing the view or replacing its task is expected.
+    } catch {
+      guard loads.accepts(revision), !Task.isCancelled else { return }
+      self.error = error.localizedDescription
+    }
   }
   func list(_ app: LibraryModel, kind: String, query: String, more: Bool = false) async {
     let request = UUID()
     requestID = request
     busy = true
-    let offset = more ? observations.count : 0
+    defer { if requestID == request { busy = false } }
+    let requestedListing = ListingQuery(kind: kind, query: query)
+    let append = more && listing == requestedListing
+    let offset = append ? observations.count : 0
+    if listing != requestedListing { observations = []; total = 0 }
+    listing = requestedListing
     do {
       let page: ObservationPage = try await app.query(
         prefix + "/observations",
         parameters: ["kind": kind, "q": query, "offset": String(offset), "limit": "40"])
-      guard requestID == request else { return }
-      observations = more ? observations + page.items : page.items
+      guard requestID == request, !Task.isCancelled else { return }
+      observations = append ? observations + page.items : page.items
       total = page.total
       busy = false
     } catch {
       guard requestID == request else { return }
-      self.error = error.localizedDescription
+      if !Task.isCancelled { self.error = error.localizedDescription }
       busy = false
     }
+  }
+  func close() {
+    loads.invalidate()
+    requestID = UUID()
+    selected = nil
+    playback.close()
   }
   func select(_ node: Observation, app: LibraryModel) {
     selected = node
@@ -57,7 +79,9 @@ import SwiftUI
       do {
         let full: Observation = try await app.request(prefix + "/items/\(node.id)")
         if selected?.id == node.id { selected = full }
-      } catch { self.error = error.localizedDescription }
+      } catch {
+        if selected?.id == node.id, !Task.isCancelled { self.error = error.localizedDescription }
+      }
     }
   }
 }

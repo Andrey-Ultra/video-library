@@ -43,20 +43,23 @@ def synchronize(store):
             asset["content_hash"] = record["hash"]
             locations.setdefault(asset["path"], {**record, "video_id": asset["id"]})
 
+    locations_by_video = defaultdict(dict)
+    for location in locations.values():
+        locations_by_video[location["video_id"]][location["path"]] = location
+    record_hashes = {record["hash"] for record in records}
     candidates = defaultdict(list)
     for asset in before.values():
         if asset["content_hash"]:
             candidates[asset["content_hash"]].append(asset)
     # Prefer an already indexed representative when merging pre-existing copies.
-    for assets in candidates.values():
-        assets.sort(
-            key=lambda a: (
-                -store.db.execute(
-                    "SELECT count(*) FROM stages WHERE video_id=? AND status='complete'", (a["id"],)
-                ).fetchone()[0],
-                a["id"],
-            )
+    completed = {
+        row[0]: row[1]
+        for row in store.db.execute(
+            "SELECT video_id,count(*) FROM stages WHERE status='complete' GROUP BY video_id"
         )
+    }
+    for assets in candidates.values():
+        assets.sort(key=lambda a: (-completed.get(a["id"], 0), a["id"]))
     full_hashes = {}
 
     def full(path):
@@ -65,7 +68,7 @@ def synchronize(store):
         return full_hashes[path]
 
     def matches(asset, record):
-        old_locations = [r for r in locations.values() if r["video_id"] == asset["id"]]
+        old_locations = locations_by_video[asset["id"]].values()
         for old in old_locations:
             if (old["device"], old["inode"]) == (record["device"], record["inode"]):
                 return True  # same source, possibly renamed or touched
@@ -97,12 +100,12 @@ def synchronize(store):
                 # Reuse the ID of a changed single-location source, unless it has
                 # already been assigned to surviving content at another path.
                 old_id = previous["video_id"] if previous else None
-                old_paths = [r for r in locations.values() if r["video_id"] == old_id]
+                old_paths = locations_by_video[old_id]
                 reusable = (
                     old_id in before
                     and old_id not in assigned
                     and len(old_paths) == 1
-                    and before[old_id]["content_hash"] not in {r["hash"] for r in records}
+                    and before[old_id]["content_hash"] not in record_hashes
                 )
                 if reusable:
                     video_id = old_id
@@ -126,7 +129,11 @@ def synchronize(store):
                     "error": None,
                 }
                 candidates[record["hash"]].append(asset)
+                previous_location = locations.get(record["path"])
+                if previous_location:
+                    locations_by_video[previous_location["video_id"]].pop(record["path"], None)
                 locations[record["path"]] = {**record, "video_id": video_id}
+                locations_by_video[video_id][record["path"]] = locations[record["path"]]
             assigned[asset["id"]] = asset
             groups[asset["id"]].append(record)
         store.db.execute("DELETE FROM file_locations")

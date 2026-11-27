@@ -301,18 +301,24 @@ def test_unreadable_changed_file_cannot_leave_searchable_old_evidence(
         assert not library.search(store, config, "fox", lexical_only=True)["hits"]
 
 
-def test_invalid_hierarchy_cannot_publish_an_incomplete_tree(tmp_path, config, fake_media):
+def test_invalid_hierarchy_falls_back_without_losing_visual_evidence(tmp_path, config, fake_media):
     class BrokenGroups(FakeGenerator):
-        def generate(self, *a, **kw):
-            return '{"groups":[{"children":["invented-id"],"description":"invented"}]}'
+        def generate(self, prompt, *a, **kw):
+            if "OBSERVATIONS:" in prompt:
+                return '{"groups":[{"children":["invented-id"],"description":"invented"}]}'
+            return super().generate(prompt, *a, **kw)
 
     fake_media["hierarchy"] = lambda _: BrokenGroups()
     with Store(tmp_path) as store:
         result = Indexer(store, config, fake_media).run()
-        assert result["complete"] == 0
-        assert store.stage(1, "hierarchy")["status"] == "failed"
-        assert not store.items(1, stage="hierarchy")
-        assert store.items(1, stage="visual", complete_only=True)
+        assert result["complete"] == 1 and not result["errors"]
+        assert store.stage(1, "hierarchy")["status"] == "complete"
+        events = store.items(1, kind="event")
+        assert len(events) == 3
+        assert all(e["payload"]["grouping"] == "single_window_fallback" for e in events)
+        children = [child for event in events for child in store.item(event["id"])["children"]]
+        assert children == [n["id"] for n in store.items(1, stage="visual")]
+        assert all("invented" not in e["text"] for e in events)
 
 
 def test_answer_sources_have_deterministic_timestamps(tmp_path, config, fake_media):

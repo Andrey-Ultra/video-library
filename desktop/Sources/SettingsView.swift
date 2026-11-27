@@ -17,6 +17,11 @@ struct SettingsView: View {
   @State private var thirdPartySections = Set<String>()
   @State private var deletePrompt = false
   @State private var assetToDelete: LocalModelAsset?
+  @State private var initialized = false
+  @State private var inventoryRequests = LatestRequest()
+  @State private var visible = false
+  @State private var classifiedCatalog = false
+  @State private var editedProcessingSections = Set<String>()
 
   var body: some View {
     VStack(alignment: .leading, spacing: 18) {
@@ -42,7 +47,7 @@ struct SettingsView: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 20) {
           recommendationPanel
-          proxyPanel
+          AnalysisProxyPanel(resolution: string("proxy", "resolution"), maxFPS: number("proxy", "max_fps"))
           analysisPanel("Visual understanding", subtitle: "Describe scenes, objects and actions.") {
             processingPicker("visual", options: [("mlx", "On this Mac"), ("none", "Off")])
             if thirdPartySections.contains("visual") {
@@ -110,7 +115,7 @@ struct SettingsView: View {
           }
           advancedPanel
         }.padding(.trailing, 5)
-      }
+      }.disabled(saving)
       if let inventoryError {
         HStack {
           Text(inventoryError).font(.system(size: 11)).foregroundStyle(.orange)
@@ -128,11 +133,14 @@ struct SettingsView: View {
         Spacer()
         ActionButton(label: "Cancel", disabled: saving) { dismiss() }
         ActionButton(label: saving ? "Saving…" : startLabel, primary: true,
-                     disabled: saving || resources == nil || (!rawEdited && !missingModels.isEmpty)) { save() }
+                     disabled: saving || resources == nil || !startingDownloads.isEmpty || (!rawEdited && !missingModels.isEmpty)) { save() }
       }
     }.padding(28).frame(width: 720, height: 790).background(Palette.background)
       .preferredColorScheme(.dark).interactiveDismissDisabled(saving)
       .onAppear {
+        visible = true
+        guard !initialized else { return }
+        initialized = true
         config = session.config
         if config["speech"]["language"].string.isEmpty {
           config["speech"]["language"] = .string(config["speech"]["backend"].string == "faster-whisper" ? "en" : "auto")
@@ -140,16 +148,16 @@ struct SettingsView: View {
         if config["proxy"].object.isEmpty {
           config["proxy"] = .object(["resolution": .string("original"), "max_fps": .number(0), "cache_mb": .number(512)])
         }
-        for section in ["visual", "speech", "embedding"] {
-          let known = ["visual": ["mlx-community/Qwen3-VL-2B-Instruct-4bit", "mlx-community/Qwen3-VL-4B-Instruct-4bit"],
-            "speech": ["mlx-community/parakeet-tdt-0.6b-v3", "mlx-community/parakeet-tdt-0.6b-v2"],
-            "embedding": ["mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ"]]
-          if config[section]["backend"].string != "none" && !(known[section] ?? []).contains(config[section]["model"].string) {
+        for (section, localBackend) in ModelResources.localBackends {
+          if config[section]["backend"].string != "none" && config[section]["backend"].string != localBackend {
             thirdPartySections.insert(section)
           }
-          if section == "visual" && config[section]["backend"].string == "openai" { thirdPartySections.insert(section) }
         }
         raw = config.pretty
+      }
+      .onDisappear {
+        visible = false
+        inventoryRequests.invalidate()
       }
       .alert("Delete downloaded model?", isPresented: $deletePrompt, presenting: assetToDelete) { asset in
         Button("Delete model", role: .destructive) { deleteModel(asset) }
@@ -216,6 +224,7 @@ struct SettingsView: View {
     let selection = Binding<String>(get: {
       thirdPartySections.contains(section) ? "third-party" : config[section]["backend"].string
     }, set: { value in
+      editedProcessingSections.insert(section)
       if value == "third-party" {
         thirdPartySections.insert(section)
         if config[section]["backend"].string == "none" {
@@ -326,11 +335,13 @@ struct SettingsView: View {
   }
   func deleteModel(_ asset: LocalModelAsset) {
     startingDownloads.insert(asset.id)
+    inventoryRequests.invalidate()
+    let actionConfig = config
     Task {
       defer { startingDownloads.remove(asset.id) }
       do {
         let _: JSONValue = try await model.request("api/models/delete", method: "POST",
-          body: .object(["config": config, "model": .string(asset.id), "confirmed": .bool(true)]))
+          body: .object(["config": actionConfig, "model": .string(asset.id), "confirmed": .bool(true)]))
         await refreshModels()
       } catch { self.error = error.localizedDescription }
     }
@@ -418,33 +429,51 @@ struct SettingsView: View {
     }
   }
   func refreshModels() async {
-    guard !config.object.isEmpty else { return }
+    guard visible, !saving, !config.object.isEmpty else { return }
+    let revision = inventoryRequests.begin()
+    let requestedConfig = config
     do {
       let value: ModelResources = try await model.request("api/models/status", method: "POST",
-        body: .object(["config": config]))
+        body: .object(["config": requestedConfig]))
+      guard visible, !Task.isCancelled, inventoryRequests.accepts(revision),
+        requestedConfig["runtime"] == config["runtime"] else { return }
       resources = value
+      if !classifiedCatalog {
+        // A delayed first inventory must not override a choice already made in the form.
+        thirdPartySections.formUnion(value.customModelSections(in: config).subtracting(editedProcessingSections))
+        classifiedCatalog = true
+      }
       inventoryError = nil
+    } catch is CancellationError {
+      // Closing the sheet is not an inventory failure.
     } catch {
-      inventoryError = "Could not check local models. Retry before starting."
+      guard visible, !Task.isCancelled, inventoryRequests.accepts(revision),
+        requestedConfig["runtime"] == config["runtime"] else { return }
+      inventoryError = error.localizedDescription
     }
   }
   func download(_ asset: LocalModelAsset) {
     startingDownloads.insert(asset.id)
+    inventoryRequests.invalidate()
+    let actionConfig = config
     Task {
       defer { startingDownloads.remove(asset.id) }
       do {
         let _: JSONValue = try await model.request("api/models/download", method: "POST",
-          body: .object(["config": config, "model": .string(asset.id)]))
+          body: .object(["config": actionConfig, "model": .string(asset.id)]))
         await refreshModels()
       } catch { self.error = error.localizedDescription }
     }
   }
   func save() {
     saving = true
+    inventoryRequests.invalidate()
     error = nil
+    let rawToSave = rawEdited ? raw : nil
+    let draftToSave = config
     Task {
       do {
-        let value = rawEdited ? try JSONDecoder().decode(JSONValue.self, from: Data(raw.utf8)) : config
+        let value = try rawToSave.map { try JSONDecoder().decode(JSONValue.self, from: Data($0.utf8)) } ?? draftToSave
         if value["visual"]["backend"].string == "openai" && value["visual"]["model"].string.trimmingCharacters(in: .whitespaces).isEmpty {
           throw NSError(domain: "VideoLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: "Enter the model name provided by your API server."])
         }
@@ -456,7 +485,7 @@ struct SettingsView: View {
         let checked: ModelResources = try await model.request("api/models/status", method: "POST", body: .object(["config": value]))
         resources = checked
         if checked.models.contains(where: { checked.required.contains($0.id) && $0.status != "ready" }) {
-          if rawEdited { config = value; rawEdited = false; raw = value.pretty }
+          if rawToSave != nil { config = value; rawEdited = false; raw = value.pretty }
           throw NSError(domain: "VideoLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: "Download or retry the selected models above before starting indexing."])
         }
         try await model.saveIndexSettings(value, session: session)
@@ -466,94 +495,5 @@ struct SettingsView: View {
         saving = false
       }
     }
-  }
-  var proxyPanel: some View {
-    Panel {
-      VStack(alignment: .leading, spacing: 13) {
-        Text("Analysis proxy").font(.system(size: 15, weight: .medium))
-        HStack {
-          Text("Resolution").foregroundStyle(Palette.muted)
-          Spacer()
-          Picker("Proxy resolution", selection: string("proxy", "resolution")) {
-            Text("Original · No resizing").tag("original")
-            Text("Up to 1080p").tag("1080p")
-            Text("Up to 720p").tag("720p")
-          }.labelsHidden().frame(width: 230).accessibilityLabel("Proxy resolution")
-        }
-        HStack {
-          Text("Max frame rate").foregroundStyle(Palette.muted)
-          Spacer()
-          Picker("Proxy frame rate", selection: number("proxy", "max_fps")) {
-            Text("Original").tag(Double(0))
-            ForEach([30, 15, 5], id: \.self) { fps in
-              Text("Up to \(fps) fps").tag(Double(fps))
-            }
-          }.labelsHidden().frame(width: 230).accessibilityLabel("Proxy frame rate")
-        }
-        Text("Temporary smaller video copies for visual analysis and OCR. Playback and speech use the original. Resolution and frame rate are only reduced.")
-          .font(.system(size: 12)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
-        Text("Creating a proxy takes time and disk space, so short clips may not be faster overall. Lower resolution can lose small text; lower FPS can miss brief events. Proxy FPS is separate from the number of frames the AI analyzes.")
-          .font(.system(size: 11)).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true)
-      }.font(.system(size: 13)).padding(18)
-    }
-  }
-}
-struct MCPView: View {
-  @EnvironmentObject var model: LibraryModel
-  @Environment(\.dismiss) var dismiss
-  @State private var format = "Codex CLI"
-  @State private var copied = false
-  var text: String {
-    guard let state = model.state else { return "" }
-    let config = state.mcp_config["mcpServers"]["video-library"]
-    switch format {
-    case "JSON": return state.mcp_config.pretty
-    case "Codex TOML":
-      return
-        "[mcp_servers.video-library]\ncommand = \(config["command"].pretty)\nargs = \(config["args"].pretty)"
-    default: return state.mcp_command
-    }
-  }
-  var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      HStack {
-        LibraryMark()
-        VStack(alignment: .leading, spacing: 7) {
-          SectionCaption(title: "Model Context Protocol")
-          Text("Your footage, in your agent").font(.system(size: 23, weight: .semibold))
-        }
-        Spacer()
-      }
-      Text(
-        "Add this local stdio server once. Your agent can list libraries and choose a library_id independently of this window, even when the app is closed."
-      ).font(.system(size: 14)).foregroundStyle(Palette.muted).lineSpacing(5)
-      LibraryTabs(
-        label: "Connection format", tabs: ["Codex CLI", "JSON", "Codex TOML"], selection: $format)
-      ScrollView {
-        Text(text).font(.system(size: 12, design: .monospaced)).textSelection(.enabled).frame(
-          maxWidth: .infinity, alignment: .leading
-        ).padding(17)
-      }.frame(minHeight: 140, maxHeight: 260).background(
-        Palette.panel, in: RoundedRectangle(cornerRadius: 7))
-      Label(model.state?.active?.path ?? "Choose a folder first", systemImage: "folder").font(
-        .system(size: 12)
-      ).foregroundStyle(Palette.accent).textSelection(.enabled)
-      Text(
-        "Search · Browse events · Explore trees · Inspect frames\nAsk your agent: “What is in my active video library?”"
-      ).font(.system(size: 12)).foregroundStyle(Palette.muted).lineSpacing(8)
-      HStack {
-        Spacer()
-        ActionButton(label: "Done") { dismiss() }
-        ActionButton(
-          label: copied ? "Copied" : format == "Codex CLI" ? "Copy command" : "Copy configuration",
-          primary: true
-        ) {
-          NSPasteboard.general.clearContents()
-          NSPasteboard.general.setString(text, forType: .string)
-          copied = true
-        }
-      }
-    }.padding(28).frame(width: 660).background(Palette.background).preferredColorScheme(.dark)
-      .onChange(of: format) { _, _ in copied = false }
   }
 }

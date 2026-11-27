@@ -33,7 +33,8 @@ class ProgressTracker:
                 for stage in video["stages"]:
                     name = stage["name"]
                     if (
-                        stage.get("signature") != signatures[name]
+                        name not in signatures
+                        or stage.get("signature") != signatures[name]
                         or name in video.get("outdated", [])
                         or stage["status"] not in {"running", "complete"}
                     ):

@@ -12,6 +12,18 @@ from pathlib import Path
 from .speech_options import PARAKEET_V3, WHISPER_LANGUAGES
 
 
+def _valid_setting_type(default, value):
+    # bool is an int subclass; accepting it here makes TOML counts/FPS silently
+    # turn into 0/1 while the equivalent JSON settings correctly reject it.
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, int):
+        return isinstance(value, int) and not isinstance(value, bool)
+    if isinstance(default, float):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, str)
+
+
 @dataclass
 class VisualConfig:
     backend: str = "mlx"
@@ -94,6 +106,11 @@ class Config:
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
 
     def validate(self):
+        for section in fields(self):
+            settings = getattr(self, section.name)
+            for setting in fields(settings):
+                if not _valid_setting_type(setting.default, getattr(settings, setting.name)):
+                    raise ValueError(f"Invalid type: {section.name}.{setting.name}")
         choices = {
             "visual": {"mlx", "openai", "none"},
             "speech": {"parakeet", "faster-whisper", "none"},
@@ -186,6 +203,8 @@ def load_config(path: str | Path | None = None, profile: str | None = None) -> C
             raise ValueError(f"Unknown config sections: {sorted(set(raw) - allowed_sections)}")
         for section, settings in raw.items():
             target = getattr(config, section)
+            if not isinstance(settings, dict):
+                raise ValueError(f"Config section [{section}] must be a table")
             allowed = {f.name for f in fields(target)}
             if set(settings) - allowed:
                 raise ValueError(f"Unknown settings in [{section}]: {sorted(set(settings) - allowed)}")
@@ -198,9 +217,10 @@ def load_config(path: str | Path | None = None, profile: str | None = None) -> C
                 target.language = "en"
             for name, value in settings.items():
                 setattr(target, name, value)
+    # Validate types before using path-like fields in filesystem operations.
+    config.validate()
     base = Path(path).resolve().parent if path else Path(__file__).resolve().parent.parent
     config.runtime.cache_dir = str((base / config.runtime.cache_dir).expanduser().resolve())
-    config.validate()
     return config
 
 
@@ -231,14 +251,7 @@ def parse_config(raw):
             if key not in allowed:
                 raise ValueError(f"Unknown setting: {section}.{key}")
             current = getattr(target, key)
-            if isinstance(current, bool):
-                valid = isinstance(value, bool)
-            elif isinstance(current, (int, float)):
-                valid = isinstance(value, (int, float)) and not isinstance(value, bool)
-                if isinstance(current, int):
-                    valid = valid and isinstance(value, int)
-            else:
-                valid = isinstance(value, str)
+            valid = _valid_setting_type(current, value)
             if not valid:
                 raise ValueError(f"Invalid type: {section}.{key}")
             if isinstance(current, float):

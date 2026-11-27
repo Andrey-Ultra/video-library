@@ -296,3 +296,71 @@ def test_delete_api_confirmation_queue_and_shared_model_lease(setup, tmp_path, m
     monkeypatch.setattr(assets.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     assert client.post("/api/models/delete", json=body, headers=HEADERS).status_code == 200
     assert state.library(lib["id"]) and state.job(job["id"])["status"] == "paused"
+
+
+@pytest.mark.parametrize(
+    "contents", ["{", "[]", "null", '{"status": []}', '{"status":"downloading","total_files":"lots"}']
+)
+def test_bad_download_state_is_a_retryable_model_status(setup, contents):
+    cfg, hub, manager = setup
+    state, _ = manager.files(hub, REPO)
+    state.parent.mkdir(parents=True)
+    state.write_text(contents)
+    result = manager.status(cfg, assets.CATALOG[0])
+    assert result["status"] == "failed" and "Retry" in result["error"]
+
+
+def test_network_retry_preserves_partial_download_instead_of_forcing_full_download(setup, monkeypatch):
+    cfg, hub, manager = setup
+    tiny_snapshot(hub)
+    state, _ = manager.files(hub, REPO)
+    assets._write(state, {"status": "failed", "repair": False, "error": "offline"})
+    # Missing tokenizer makes the snapshot incomplete, but it does not mean a
+    # completed blob was corrupted. Keep resumable blobs for network retries.
+    (assets.snapshot_path(hub, REPO) / "tokenizer.json").unlink()
+    calls = []
+    monkeypatch.setattr(
+        assets.subprocess, "Popen", lambda args, **k: calls.append(args) or SimpleNamespace(wait=lambda: None)
+    )
+    assert manager.start(asdict(cfg), REPO)["started"]
+    assert "--repair" not in calls[0]
+
+
+@pytest.mark.parametrize("revision", ["..", ".", "../outside"])
+def test_invalid_snapshot_revision_is_reported_without_reading_outside_cache(setup, revision):
+    cfg, hub, manager = setup
+    path = tiny_snapshot(hub)
+    (path.parent.parent / "refs/main").write_text(revision)
+    result = manager.status(cfg, assets.CATALOG[0])
+    assert result["status"] == "failed" and "revision" in result["error"]
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        [],
+        {"w": []},
+        {"w": {"data_offsets": [0]}},
+        {"w": {"data_offsets": [-1, 4]}},
+        {"w": {"data_offsets": [False, 4]}},
+        {"a": {"data_offsets": [0, 3]}, "b": {"data_offsets": [2, 4]}},
+    ],
+)
+def test_malformed_safetensor_headers_do_not_crash_inventory(setup, header):
+    cfg, hub, manager = setup
+    path = tiny_snapshot(hub)
+    raw = json.dumps(header).encode()
+    (path / "model.safetensors").write_bytes(struct.pack("<Q", len(raw)) + raw + b"\0" * 4)
+    assert manager.status(cfg, assets.CATALOG[0])["status"] == "failed"
+
+
+def test_corrupt_revision_can_be_repaired_by_retry(setup, monkeypatch):
+    cfg, hub, manager = setup
+    path = tiny_snapshot(hub)
+    (path.parent.parent / "refs/main").write_text("..")
+    calls = []
+    monkeypatch.setattr(
+        assets.subprocess, "Popen", lambda args, **k: calls.append(args) or SimpleNamespace(wait=lambda: None)
+    )
+    assert manager.start(asdict(cfg), REPO)["started"]
+    assert "--repair" in calls[0]

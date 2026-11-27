@@ -12,157 +12,39 @@ import fcntl
 import hashlib
 import json
 import os
-import platform
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import asdict
 from pathlib import Path
 
-from .config import load_config, parse_config
-
-CATALOG = [
-    {
-        "id": "mlx-community/Qwen3-VL-2B-Instruct-4bit",
-        "section": "visual",
-        "name": "Qwen3 VL 2B · Fast",
-        "detail": "Smaller local model. A good starting point for 8–24 GB Macs.",
-    },
-    {
-        "id": "mlx-community/Qwen3-VL-4B-Instruct-4bit",
-        "section": "visual",
-        "name": "Qwen3 VL 4B · More detail",
-        "detail": "Larger local model. More memory and processing time; suggested for 32 GB or more.",
-    },
-    {
-        "id": "mlx-community/parakeet-tdt-0.6b-v3",
-        "section": "speech",
-        "name": "Parakeet v3 · Multilingual",
-        "detail": "Automatic recognition of 25 languages, including English and Russian.",
-    },
-    {
-        "id": "mlx-community/parakeet-tdt-0.6b-v2",
-        "section": "speech",
-        "name": "Parakeet v2 · English",
-        "detail": "For English-only recordings. Choose v3 for Russian.",
-    },
-    {
-        "id": "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ",
-        "section": "embedding",
-        "name": "Qwen3 Embedding · Multilingual",
-        "detail": "Enables searching by meaning instead of exact words.",
-    },
-]
-IDS = {entry["id"] for entry in CATALOG}
+from .config import parse_config
+from .model_cache import hub_directory, snapshot_path, validate_snapshot
+from .model_catalog import CATALOG, IDS, mac_hardware, recommended_config, required_models
 
 
-def hub_directory(config):
-    return (
-        Path(
-            os.environ.get("HF_HUB_CACHE")
-            or Path(os.environ.get("HF_HOME") or config.runtime.cache_dir) / "hub"
-        )
-        .expanduser()
-        .resolve()
-    )
-
-
-def mac_hardware():
-    def sysctl(name, fallback):
-        try:
-            return subprocess.check_output(["/usr/sbin/sysctl", "-n", name], text=True, timeout=3).strip()
-        except (OSError, subprocess.SubprocessError):
-            return fallback
-
-    apple = platform.system() == "Darwin" and platform.machine() == "arm64"
-    return {
-        "supported": apple,
-        "chip": sysctl("machdep.cpu.brand_string", platform.machine()) if apple else platform.machine(),
-        "memory_gb": round(int(sysctl("hw.memsize", "0")) / 1024**3) if apple else 0,
-        "cpu_cores": os.cpu_count() or 1,
-    }
-
-
-def recommended_config(hardware):
-    cfg = load_config(profile="mac")
-    memory = hardware["memory_gb"]
-    if memory >= 32:
-        cfg.visual.model = CATALOG[1]["id"]
-        cfg.visual.frames_per_window, cfg.visual.max_side = 8, 672
-        cfg.embedding.batch_size = 16
-    elif memory and memory <= 8:
-        cfg.visual.frames_per_window, cfg.visual.max_side = 4, 384
-        cfg.embedding.batch_size = 4
-    return asdict(cfg)
-
-
-def snapshot_path(hub, repo):
-    root = Path(hub) / ("models--" + repo.replace("/", "--"))
-    ref = root / "refs/main"
-    if not ref.is_file():
-        return None
-    revision = ref.read_text().strip()
-    if not revision or Path(revision).name != revision:
-        return None
-    return root / "snapshots" / revision
-
-
-def validate_snapshot(path, section):
-    if path is None or not path.is_dir():
-        raise FileNotFoundError("Model is not downloaded")
-    required = ["config.json"]
-    if section in {"visual", "embedding"}:
-        required += ["tokenizer.json", "tokenizer_config.json"]
-    if section == "visual":
-        required += ["preprocessor_config.json"]
-    for name in required:
-        if not (path / name).is_file():
-            raise ValueError(f"Model is incomplete: missing {name}")
-    for file in path.glob("*.json"):
-        if not file.name.startswith("."):
-            json.loads(file.read_text())
-    index = path / "model.safetensors.index.json"
-    # MLX loaders prefer consolidated weights. Some official converted repos
-    # retain a stale shard index alongside their complete model.safetensors.
-    weights = (
-        ["model.safetensors"]
-        if (path / "model.safetensors").is_file()
-        else sorted(set(json.loads(index.read_text())["weight_map"].values()))
-        if index.is_file()
-        else ["model.safetensors"]
-    )
-    if not weights:
-        raise ValueError("Model has no weight files")
-    for name in weights:
-        if Path(name).name != name:
-            raise ValueError("Invalid model weight filename")
-        file = path / name
-        if not file.is_file():
-            raise ValueError(f"Model is incomplete: missing {name}")
-        # Check the safetensors header and data length without loading any tensors.
-        with file.open("rb") as stream:
-            raw = stream.read(8)
-            if len(raw) != 8:
-                raise ValueError(f"Incomplete weights: {name}")
-            size = struct.unpack("<Q", raw)[0]
-            if not 2 <= size <= min(100_000_000, file.stat().st_size - 8):
-                raise ValueError(f"Invalid weights: {name}")
-            header = json.loads(stream.read(size))
-        tensors = [v for k, v in header.items() if k != "__metadata__"]
-        if not tensors or max(v["data_offsets"][1] for v in tensors) != file.stat().st_size - 8 - size:
-            raise ValueError(f"Truncated weights: {name}")
-
-
-def required_models(config):
-    result = []
-    for section, backends in (("visual", {"mlx"}), ("speech", {"parakeet"}), ("embedding", {"mlx"})):
-        settings = getattr(config, section)
-        if settings.backend in backends and settings.model in IDS:
-            result.append(settings.model)
-    return result
+def _read_state(path):
+    try:
+        value = json.loads(path.read_text())
+        if not isinstance(value, dict) or value.get("status") not in {
+            "downloading",
+            "checking",
+            "ready",
+            "failed",
+        }:
+            raise ValueError("Invalid download state")
+        for key in ("completed_files", "total_files"):
+            if key in value and (type(value[key]) is not int or value[key] < 0):
+                raise ValueError("Invalid download progress")
+        for key in ("error", "filename"):
+            if key in value and value[key] is not None and not isinstance(value[key], str):
+                raise ValueError("Invalid download details")
+        return value
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError, TypeError):
+        return {"status": "failed", "error": "Download state could not be read. Retry the download."}
 
 
 def _write(path, value):
@@ -189,19 +71,23 @@ class ModelAssets:
     def status(self, config, entry):
         hub = hub_directory(config)
         state, lock = self.files(hub, entry["id"])
-        previous = json.loads(state.read_text()) if state.is_file() else {}
+        previous = _read_state(state)
         if lock.is_file():
             with lock.open("rb") as handle:
                 try:
                     fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
                     return {**entry, **previous, "status": previous.get("status", "downloading")}
+        return self._cached_status(hub, entry, previous)
+
+    def _cached_status(self, hub, entry, previous):
         if previous.get("status") == "failed" and previous.get("repair"):
             return {**entry, **previous}
         if previous.get("status") in {"downloading", "checking"}:
             return {**entry, "status": "failed", "error": "Download was interrupted. Retry to continue."}
-        path = snapshot_path(hub, entry["id"])
+        path = None
         try:
+            path = snapshot_path(hub, entry["id"])
             # Cache header validation only while the snapshot's files stay unchanged.
             stamp = (
                 tuple((p.name, p.stat().st_size, p.stat().st_mtime_ns) for p in sorted(path.iterdir()))
@@ -218,7 +104,12 @@ class ModelAssets:
                 return {**entry, **previous}
             if previous.get("status") in {"downloading", "checking"}:
                 return {**entry, "status": "failed", "error": "Download was interrupted. Retry to continue."}
-            return {**entry, "status": "failed" if path else "missing", "error": str(exc) if path else None}
+            missing = isinstance(exc, FileNotFoundError) and path is None
+            return {
+                **entry,
+                "status": "missing" if missing else "failed",
+                "error": None if missing else str(exc),
+            }
 
     def resources(self, raw):
         config = parse_config(raw)
@@ -231,7 +122,7 @@ class ModelAssets:
 
     def start(self, raw, repo):
         config = parse_config(raw)
-        if repo not in IDS:
+        if not isinstance(repo, str) or repo not in IDS:
             raise ValueError("Choose a model from the local model list")
         hub = hub_directory(config)
         state, lock = self.files(hub, repo)
@@ -245,9 +136,16 @@ class ModelAssets:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 return {"started": False}
-            previous = json.loads(state.read_text()) if state.is_file() else {}
+            previous = _read_state(state)
+            current = self._cached_status(hub, entry, previous)
+            if current["status"] == "ready":
+                return {"started": False}
+            # Network failures resume partial blobs; only corrupt completed files
+            # require force_download. Never discard partial work just for a retry.
             force = previous.get("repair", False) or (
-                current["status"] == "failed" and snapshot_path(hub, repo) is not None
+                current["status"] == "failed"
+                and not previous
+                and (hub / ("models--" + repo.replace("/", "--"))).exists()
             )
             _write(state, {"status": "downloading", "completed_files": 0, "total_files": 0})
             try:
@@ -280,7 +178,7 @@ class ModelAssets:
 
     def delete(self, raw, repo):
         """Remove only this catalog model's HF repository, including partial blobs."""
-        if repo not in IDS:
+        if not isinstance(repo, str) or repo not in IDS:
             raise ValueError("Only downloaded catalog models can be removed here")
         hub = hub_directory(parse_config(raw))
         state, lease = self.files(hub, repo)
@@ -413,6 +311,7 @@ def main():
     parser.add_argument("--lock-fd", type=int, required=True)
     parser.add_argument("--repair", action="store_true")
     args = parser.parse_args()
+    os.set_inheritable(args.lock_fd, False)
     try:
         download(args.model, Path(args.hub), Path(args.state), args.repair)
     finally:

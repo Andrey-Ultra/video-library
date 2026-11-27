@@ -308,10 +308,19 @@ struct MacHardware: Decodable {
   var description: String { "\(chip) · \(memory_gb) GB memory" }
 }
 struct ModelResources: Decodable {
+  static let localBackends = ["visual": "mlx", "speech": "parakeet", "embedding": "mlx"]
   let hardware: MacHardware
   let recommended: JSONValue
   let models: [LocalModelAsset]
   let required: [String]
+  func customModelSections(in config: JSONValue) -> Set<String> {
+    Set(Self.localBackends.compactMap { section, localBackend in
+      let backend = config[section]["backend"].string
+      guard backend != "none" else { return nil }
+      let managed = models.contains { $0.section == section && $0.id == config[section]["model"].string }
+      return backend != localBackend || !managed ? section : nil
+    })
+  }
   func suggestedConfig(preserving current: JSONValue) -> JSONValue {
     var result = recommended
     for section in ["runtime", "proxy", "answer"] { result[section] = current[section] }

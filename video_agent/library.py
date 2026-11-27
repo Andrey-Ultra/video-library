@@ -52,6 +52,16 @@ def overview(store: Store, offset=0, limit=20, video_id=None):
     }
 
 
+def query_embedding(config, query, embedder_factory=backends.embedder):
+    """Encode one query and release model memory before answer generation."""
+    config.configure_cache()
+    backend = embedder_factory(config)
+    try:
+        return backends.normalized(backend.encode([query], query=True))[0]
+    finally:
+        backend.close()
+
+
 def search(
     store: Store,
     config: Config,
@@ -61,6 +71,7 @@ def search(
     source="all",
     lexical_only=False,
     embedder_factory=backends.embedder,
+    query_vector_factory=None,
 ):
     if not query.strip():
         raise ValueError("Query must not be empty")
@@ -100,20 +111,21 @@ def search(
         )
         first = vector_rows.fetchmany(256)
         if first:
-            config.configure_cache()
-            backend = embedder_factory(config)
-            try:
-                vector = backends.normalized(backend.encode([query], query=True))[0]
-            finally:
-                backend.close()
+            vector = (
+                query_vector_factory()
+                if query_vector_factory is not None
+                else query_embedding(config, query, embedder_factory)
+            )
             best = []
             batch = first
             while batch:
-                if any(row["dims"] != len(vector) for row in batch):
+                if any(row["dims"] != len(vector) or len(row["data"]) != len(vector) * 4 for row in batch):
                     raise ValueError(
                         "Stored embedding dimensions do not match query model; reindex embeddings"
                     )
                 matrix = np.stack([np.frombuffer(row["data"], dtype="<f4") for row in batch])
+                if not np.isfinite(matrix).all():
+                    raise ValueError("Stored embeddings contain non-finite values; reindex embeddings")
                 similarities = matrix @ vector
                 for row, score in zip(batch, similarities, strict=True):
                     candidate = (float(score), row["id"])

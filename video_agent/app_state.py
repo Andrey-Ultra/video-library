@@ -60,6 +60,8 @@ class AppState:
             if "position" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN position REAL NOT NULL DEFAULT 0")
                 db.execute("UPDATE jobs SET position=created_at")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(status,position,created_at)")
+            db.execute("CREATE INDEX IF NOT EXISTS jobs_library_latest ON jobs(library_id,created_at DESC)")
             db.execute(
                 "INSERT OR IGNORE INTO preferences(key,value) SELECT 'queue_paused',"
                 "CASE WHEN EXISTS(SELECT 1 FROM jobs WHERE status IN ('paused','interrupted')) THEN '1' ELSE '0' END"
@@ -277,23 +279,27 @@ class AppState:
                 [*values.values(), job_id],
             )
 
-    def job(self, job_id):
-        with self.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            raise ValueError("Job not found")
+    @staticmethod
+    def _job_row(row):
         value = dict(row)
         for key in ("config", "result"):
             if value[key]:
                 value[key] = json.loads(value[key])
         return value
 
+    def job(self, job_id):
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Job not found")
+        return self._job_row(row)
+
     def latest_job(self, library_id):
         with self.connect() as db:
             row = db.execute(
-                "SELECT id FROM jobs WHERE library_id=? ORDER BY created_at DESC LIMIT 1", (library_id,)
+                "SELECT * FROM jobs WHERE library_id=? ORDER BY created_at DESC LIMIT 1", (library_id,)
             ).fetchone()
-        return self.job(row[0]) if row else None
+        return self._job_row(row) if row else None
 
     def _lock(self):
         stream = (self.directory / "worker.lock").open("a")
@@ -336,15 +342,16 @@ class AppState:
             return bool(row and row[0] == "1")
 
     def queue_jobs(self):
+        # Read rows together: a concurrent library deletion cannot leave IDs that
+        # disappear between this query and a second connection's job() lookup.
         with self.connect() as db:
-            ids = [
-                r[0]
-                for r in db.execute(
-                    "SELECT id FROM jobs WHERE status IN ('queued','starting','running','pausing','paused','interrupted') "
+            return [
+                self._job_row(row)
+                for row in db.execute(
+                    "SELECT * FROM jobs WHERE status IN ('queued','starting','running','pausing','paused','interrupted') "
                     "ORDER BY CASE WHEN status IN ('starting','running','pausing') THEN 0 ELSE 1 END,position,created_at"
                 )
             ]
-        return [self.job(i) for i in ids]
 
     def _recover_locked(self):
         runner = self._runner_lock()
@@ -451,9 +458,10 @@ class AppState:
             ).rowcount
             if stale:
                 db.execute("INSERT OR REPLACE INTO preferences VALUES('queue_paused','1')")
+            paused = db.execute("SELECT value FROM preferences WHERE key='queue_paused'").fetchone()
             row = (
                 None
-                if self.queue_paused()
+                if paused and paused[0] == "1"
                 else db.execute(
                     "SELECT id FROM jobs WHERE status='queued' ORDER BY position,created_at LIMIT 1"
                 ).fetchone()
@@ -553,7 +561,13 @@ class AppState:
         return self.job(job_id)
 
     def cancelled(self, job_id):
-        return bool(self.job(job_id)["cancel_requested"])
+        # Called for every frame/checkpoint; avoid decoding the job's entire
+        # configuration/result just to read this single flag.
+        with self.connect() as db:
+            row = db.execute("SELECT cancel_requested FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Job not found")
+        return bool(row[0])
 
     def learn_timings(self, library_id, store):
         from .library import indexed_config

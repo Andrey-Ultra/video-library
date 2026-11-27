@@ -101,6 +101,7 @@ class Store:
             item_id TEXT PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,
             namespace TEXT NOT NULL, dims INTEGER NOT NULL, data BLOB NOT NULL);
         CREATE INDEX IF NOT EXISTS vectors_namespace ON vectors(namespace);
+        CREATE INDEX IF NOT EXISTS edges_child ON edges(child_id);
         CREATE VIRTUAL TABLE IF NOT EXISTS items_fts USING fts5(text, item_id UNINDEXED);
         CREATE TRIGGER IF NOT EXISTS items_insert AFTER INSERT ON items BEGIN
             INSERT INTO items_fts(text,item_id) VALUES(new.text,new.id);
@@ -126,6 +127,7 @@ class Store:
         CREATE TABLE IF NOT EXISTS file_locations(
             path TEXT PRIMARY KEY, video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
             size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS locations_video ON file_locations(video_id);
         CREATE TABLE IF NOT EXISTS work_cache(
             video_id INTEGER REFERENCES videos(id) ON DELETE CASCADE, stage TEXT NOT NULL,
             key TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(video_id,stage,key));
@@ -243,23 +245,48 @@ class Store:
             self.db.execute("UPDATE videos SET present=0")
             self.db.executemany("UPDATE videos SET present=1 WHERE path=?", [(str(p),) for p in paths])
 
+    @staticmethod
+    def _video_row(row):
+        result = dict(row)
+        result["metadata"] = json.loads(result["metadata"])
+        result["stages"] = []
+        return result
+
+    @staticmethod
+    def _stage_row(row):
+        result = dict(row)
+        result["provenance"] = json.loads(result.get("provenance", "{}"))
+        return result
+
     def video(self, video_id: int) -> dict:
         row = self.db.execute("SELECT * FROM videos WHERE id=?", (video_id,)).fetchone()
         if row is None:
             raise ValueError(f"Video {video_id} not found")
-        result = dict(row)
-        result["metadata"] = json.loads(result["metadata"])
+        result = self._video_row(row)
         result["stages"] = [
-            self.stage(video_id, r[0])
-            for r in self.db.execute("SELECT name FROM stages WHERE video_id=?", (video_id,)).fetchall()
+            self._stage_row(stage)
+            for stage in self.db.execute("SELECT * FROM stages WHERE video_id=? ORDER BY name", (video_id,))
         ]
         return result
 
     def videos(self, offset=0, limit=30):
-        rows = self.db.execute(
-            "SELECT id FROM videos WHERE present=1 ORDER BY path LIMIT ? OFFSET ?", (limit, offset)
-        )
-        return [self.video(r[0]) for r in rows.fetchall()]
+        # One page query plus one stage query, regardless of the library size.
+        # Repeat the page as a subquery instead of expanding an unbounded IN list
+        # (SQLite limits the number of bound parameters in large libraries).
+        page = "SELECT id FROM videos WHERE present=1 ORDER BY path LIMIT ? OFFSET ?"
+        videos = [
+            self._video_row(row)
+            for row in self.db.execute(
+                "SELECT * FROM videos WHERE present=1 ORDER BY path LIMIT ? OFFSET ?", (limit, offset)
+            )
+        ]
+        if videos:
+            by_id = {video["id"]: video for video in videos}
+            for row in self.db.execute(
+                f"SELECT * FROM stages WHERE video_id IN ({page}) ORDER BY video_id,name", (limit, offset)
+            ):
+                by_id[row["video_id"]]["stages"].append(self._stage_row(row))
+        return videos
 
     def total_videos(self):
         return self.db.execute("SELECT count(*) FROM videos WHERE present=1").fetchone()[0]
@@ -268,9 +295,7 @@ class Store:
         row = self.db.execute("SELECT * FROM stages WHERE video_id=? AND name=?", (video_id, name)).fetchone()
         if row is None:
             return None
-        result = dict(row)
-        result["provenance"] = json.loads(result.get("provenance", "{}"))
-        return result
+        return self._stage_row(row)
 
     def _invalidate_stage(self, video_id, stage, clear_vectors):
         self.db.execute("DELETE FROM work_cache WHERE video_id=? AND stage=?", (video_id, stage))
